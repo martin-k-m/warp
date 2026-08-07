@@ -1,0 +1,108 @@
+# rng.tw - deterministic randomness that can be reconstructed from a seed alone.
+#
+# Every random decision in warp is a pure function of an explicit seed. Nothing
+# reads a global generator, and no transform holds hidden state between calls.
+# The reason is reproducibility of a training run rather than tidiness: shuffle
+# order and augmentation choices are inputs to the model just as much as the
+# data is, and a run that cannot be replayed cannot be debugged or audited.
+#
+# The consequence people notice: a transform is seeded per sample, not per
+# epoch. `seed_for(base, epoch, index)` derives a seed from the run seed, the
+# epoch and the sample's position, so sample 4,013 of epoch 2 gets the same crop
+# on every machine, in any order, with any number of workers.
+#
+# All arithmetic is masked to 32 bits after every step. I64 wraps at 64 and the
+# generator is defined at 32, and `shr` on a negative I64 is unspecified, so
+# staying inside 32 bits keeps the sequence identical everywhere. See
+# docs/needs.md.
+
+mode systems
+
+let MASK32: I64 = 4294967295
+
+struct Rng {
+  state: I64,
+}
+
+# xorshift32. Not cryptographic and not meant to be: this picks crop offsets and
+# shuffle order, where the requirement is a long period and cheap evaluation.
+# A cryptographic generator here would cost more per sample than the augmentation
+# it is feeding.
+fn new(seed: I64) -> Rng = Rng { state: mix(seed) }
+
+fn next(r: Rng) -> I64 {
+  let x = r.state
+  x = mask(x xor mask(x shl 13))
+  x = x xor (x shr 17)
+  x = mask(x xor mask(x shl 5))
+  # Zero is absorbing for xorshift, so a state that reaches it stays there and
+  # the generator returns zero forever. Substituting the golden-ratio constant
+  # is one branch and removes the failure mode entirely.
+  r.state = if x == 0 { 2654435769 } else { x }
+  r.state
+}
+
+# A float in [0, 1). Divided by 2^32 rather than by MASK32 so the range is
+# genuinely half open; dividing by 2^32 - 1 makes 1.0 attainable and every
+# consumer that indexes with it goes one past the end, rarely.
+fn unit(r: Rng) -> F64 = f64(next(r)) / 4294967296.0
+
+# An integer in [0, n). The modulo is biased when n does not divide 2^32, and
+# the bias is at most one part in 2^32 / n. For n up to a few million, which is
+# a dataset index, that is far below anything a training run can distinguish, so
+# rejection sampling would be cost with no effect.
+fn below(r: Rng, n: I64) -> I64 = if n <= 0 { 0 } else { next(r) % n }
+
+fn range(r: Rng, lo: I64, hi: I64) -> I64 = lo + below(r, hi - lo + 1)
+
+fn chance(r: Rng, p: F64) -> Bool = unit(r) < p
+
+# Two independent streams from one. Splitting rather than sharing is what lets
+# a pipeline seed a shuffle and an augmentation from one run seed without the
+# two consuming each other's draws, which would make the augmentation depend on
+# the batch size.
+fn split(r: Rng) -> Rng = new(mix(r.state xor 2246822519))
+
+# The seed for one sample. Mixing all three inputs rather than adding them means
+# epoch 1 sample 2 and epoch 2 sample 1 are unrelated; adding them makes those
+# two the same seed, and the resulting diagonal correlation across an epoch is
+# exactly the kind of bug that shows up as a mysterious plateau.
+fn seed_for(base: I64, epoch: I64, index: I64) -> I64 =
+  mix(mix(base xor mask(epoch * 2654435761)) xor mask(index * 40503))
+
+# Avalanche, so that seeds 1 and 2 give unrelated streams. Without it, a run
+# seeded 1 and a run seeded 2 start almost identically, and people do seed their
+# experiments 1, 2, 3.
+fn mix(x: I64) -> I64 {
+  let h = mask(x xor 2166136261)
+  h = mask(h xor (h shr 15))
+  h = mask(h * 2246822519)
+  h = mask(h xor (h shr 13))
+  h = mask(h * 3266489917)
+  mask(h xor (h shr 16))
+}
+
+fn mask(x: I64) -> I64 = x and MASK32
+
+# A Fisher-Yates permutation of 0..n-1, drawn from `r`.
+#
+# Fisher-Yates rather than sorting by a random key: sorting is n log n and needs
+# a stable tie rule to be reproducible, and a key collision silently biases the
+# result. This is linear and every permutation is equally likely by construction.
+fn permutation(r: Rng, n: I64) -> Arr[I64] {
+  let out: Arr[I64] = []
+  let i: I64 = 0
+  while i < n {
+    out.push(i)
+    i = i + 1
+  }
+  let j = n - 1
+  while j > 0 {
+    let k = below(r, j + 1)
+    let tmp = out[j]
+    out[j] = out[k]
+    out[k] = tmp
+    j = j - 1
+  }
+  out
+}

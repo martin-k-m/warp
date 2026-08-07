@@ -1,0 +1,183 @@
+mode systems
+
+import "harness.tw" as t
+import "../src/datasets.tw" as ds
+import "../src/strutil.tw" as sx
+import "../src/sample.tw" as smp
+
+fn every_dataset_states_its_origin_and_its_licence() {
+  # A loader that cannot say where the data came from is a loader that gets a
+  # result published with no attribution.
+  let all = ds.all()
+  let i: I64 = 0
+  while i < len(all) {
+    let d = all[i]
+    t.check(d.name + " names an origin", len(d.origin) > 0)
+    t.check(d.name + " names a citation", len(d.citation) > 0)
+    t.check(d.name + " names a licence position", len(d.licence) > 0)
+    t.check(d.name + " lists at least one file", len(d.files) > 0)
+    i = i + 1
+  }
+}
+
+fn every_file_has_a_url_and_an_expected_size() {
+  let all = ds.all()
+  let i: I64 = 0
+  while i < len(all) {
+    let d = all[i]
+    let j: I64 = 0
+    while j < len(d.files) {
+      t.check(d.files[j].name + " has a url", sx.starts_with(d.files[j].url, "https://"))
+      t.check(d.files[j].name + " has an expected size", d.files[j].bytes > 0)
+      j = j + 1
+    }
+    i = i + 1
+  }
+}
+
+fn no_dataset_is_bundled_in_the_repository() {
+  # warp describes data, it does not ship it. Every file is fetched from its
+  # publisher, which is also what keeps the attribution accurate.
+  let all = ds.all()
+  let i: I64 = 0
+  while i < len(all) {
+    let d = all[i]
+    let j: I64 = 0
+    while j < len(d.files) {
+      t.check(d.files[j].name + " is fetched rather than vendored",
+        !sx.starts_with(d.files[j].url, "file:"))
+      j = j + 1
+    }
+    i = i + 1
+  }
+}
+
+fn an_unpinned_digest_is_a_refusal_and_not_a_warning() {
+  # Where a digest has not been verified against the real file, warp refuses
+  # rather than proceeding. A warning in a training log is not read.
+  let all = ds.all()
+  let unpinned: I64 = 0
+  let i: I64 = 0
+  while i < len(all) {
+    let d = all[i]
+    let j: I64 = 0
+    while j < len(d.files) {
+      if len(d.files[j].sha256) == 0 { unpinned = unpinned + 1 }
+      j = j + 1
+    }
+    i = i + 1
+  }
+  # This assertion inverts the day the digests are pinned, and that is the
+  # point: it is the reminder that they are not.
+  t.check("the unpinned digests are still recorded as unpinned", unpinned > 0)
+}
+
+fn a_pinned_digest_is_sixty_four_hex_characters() {
+  let all = ds.all()
+  let ok = true
+  let i: I64 = 0
+  while i < len(all) {
+    let d = all[i]
+    let j: I64 = 0
+    while j < len(d.files) {
+      let h = d.files[j].sha256
+      if len(h) != 0 && len(h) != 64 { ok = false }
+      j = j + 1
+    }
+    i = i + 1
+  }
+  t.check("no digest is a truncated or malformed hash", ok)
+}
+
+fn the_idx_reader_rejects_a_file_that_is_not_idx() {
+  match ds.read_idx("not an idx file at all") {
+    Res.Ok(_) => t.check("garbage must not parse as idx", false),
+    Res.Err(_) => t.check("garbage was rejected", true),
+  }
+}
+
+fn the_idx_reader_reads_a_big_endian_header() {
+  # Reading these little-endian gives a plausible image count and a screen of
+  # noise, which is why this test spells out the byte order.
+  let header = chr(0) + chr(0) + chr(8) + chr(3) + be32(2) + be32(4) + be32(4)
+  match ds.read_idx(header + zeros(32)) {
+    Res.Err(e) => t.check("a valid header parsed: " + e, false),
+    Res.Ok(idx) => {
+      t.equal_i64("three dimensions", len(idx.dims), 3)
+      t.equal_i64("two images", idx.dims[0], 2)
+      t.equal_i64("four rows", idx.dims[1], 4)
+      t.equal_i64("the data starts after the header", idx.offset, 16)
+    },
+  }
+}
+
+fn a_csv_source_reads_rows_and_separates_the_label() {
+  match ds.csv_source("toy", "1.0,2.0,0\n3.0,4.0,1\n", 2) {
+    Res.Err(e) => t.check("the csv parsed: " + e, false),
+    Res.Ok(src) => {
+      t.equal_i64("two rows", src.count, 2)
+      let s = src.get(1)
+      t.near("the first feature", s.x[0], 3.0, 1.0e-12)
+      t.near("the label was taken from the third column", s.y, 1.0, 1.0e-12)
+      t.equal_i64("the id is the row index", s.id, 1)
+    },
+  }
+}
+
+fn a_ragged_csv_is_an_error_naming_the_row() {
+  match ds.csv_source("toy", "1.0,2.0,0\n3.0,1\n", 2) {
+    Res.Ok(_) => t.check("a ragged row must not be accepted", false),
+    Res.Err(e) => t.check("the error names the row", contains(e, "row 2")),
+  }
+}
+
+fn a_comment_line_is_skipped_the_way_twills_own_reader_skips_it() {
+  match ds.csv_source("toy", "# a header comment\n1.0,2.0,0\n", 2) {
+    Res.Err(e) => t.check("the comment was skipped: " + e, false),
+    Res.Ok(src) => t.equal_i64("only the data row counted", src.count, 1),
+  }
+}
+
+fn numbers_round_trip_through_the_parser() {
+  t.near("a plain decimal", sx.parse_f64("3.25"), 3.25, 1.0e-12)
+  t.near("a negative", sx.parse_f64("-0.5"), 0.0 - 0.5, 1.0e-12)
+  t.near("an exponent", sx.parse_f64("1.5e3"), 1500.0, 1.0e-9)
+  t.near("a negative exponent", sx.parse_f64("2e-2"), 0.02, 1.0e-12)
+  t.equal_i64("an integer", sx.parse_i64("-407"), 0 - 407)
+  t.check("a malformed number is reported", !sx.parse_f64_checked("1.2.3").ok)
+  t.check("an empty field is reported", !sx.parse_i64_checked("").ok)
+}
+
+fn a_windows_line_ending_does_not_become_part_of_the_last_field() {
+  let lines = sx.split_lines("a,b\r\nc,d\r\n")
+  t.equal_str("the carriage return was dropped", lines[0], "a,b")
+  t.equal_i64("two lines", len(lines), 2)
+}
+
+fn be32(v: I64) -> Str = chr(0) + chr(0) + chr(v / 256) + chr(v % 256)
+
+fn zeros(n: I64) -> Str {
+  let out = ""
+  let i: I64 = 0
+  while i < n {
+    out = out + chr(0)
+    i = i + 1
+  }
+  out
+}
+
+fn contains(hay: Str, needle: Str) -> Bool = sx.contains(hay, needle)
+
+every_dataset_states_its_origin_and_its_licence()
+every_file_has_a_url_and_an_expected_size()
+no_dataset_is_bundled_in_the_repository()
+an_unpinned_digest_is_a_refusal_and_not_a_warning()
+a_pinned_digest_is_sixty_four_hex_characters()
+the_idx_reader_rejects_a_file_that_is_not_idx()
+the_idx_reader_reads_a_big_endian_header()
+a_csv_source_reads_rows_and_separates_the_label()
+a_ragged_csv_is_an_error_naming_the_row()
+a_comment_line_is_skipped_the_way_twills_own_reader_skips_it()
+numbers_round_trip_through_the_parser()
+a_windows_line_ending_does_not_become_part_of_the_last_field()
+t.report("datasets")

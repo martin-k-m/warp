@@ -1,0 +1,172 @@
+mode systems
+
+import "harness.tw" as t
+import "../src/pipeline.tw" as pipe
+import "../src/sample.tw" as smp
+import "../src/rng.tw" as rng
+
+# A source of n samples whose value and label are both the index, so any
+# reordering, duplication or loss is visible in the output rather than having to
+# be inferred.
+fn counting_source(n: I64) -> pipe.Source = pipe.Source {
+  name: "counting",
+  version: 1,
+  count: n,
+  get: fn(i: I64) -> smp.Sample = smp.Sample { x: [f64(i)], shape: [1], y: f64(i), id: i },
+}
+
+fn collect(p: pipe.Pipeline, limit: I64) -> Arr[I64] {
+  let it = pipe.iterate(p)
+  let out: Arr[I64] = []
+  let guard: I64 = 0
+  while guard < limit {
+    match pipe.next_batch(it) {
+      Opt.None => return out,
+      Opt.Some(b) => {
+        let i: I64 = 0
+        while i < b.n {
+          out.push(b.ids[i])
+          i = i + 1
+        }
+      },
+    }
+    guard = guard + 1
+  }
+  out
+}
+
+fn a_plain_pass_yields_every_sample_once_in_order() {
+  let p = pipe.batch(pipe.from_source(counting_source(10)), 3, false)
+  let ids = collect(p, 100)
+  t.equal_i64("every sample came through", len(ids), 10)
+  t.equal_i64("the first is first", ids[0], 0)
+  t.equal_i64("the last is last", ids[9], 9)
+}
+
+fn the_final_short_batch_is_kept_unless_drop_last_is_asked_for() {
+  let keep = pipe.batch(pipe.from_source(counting_source(10)), 4, false)
+  let drop = pipe.batch(pipe.from_source(counting_source(10)), 4, true)
+  t.equal_i64("keeping the tail gives all ten", len(collect(keep, 100)), 10)
+  # Dropping loses two of ten here. On a validation set that is a silent change
+  # to the metric, which is why the default is to keep.
+  t.equal_i64("dropping the tail gives eight", len(collect(drop, 100)), 8)
+}
+
+fn a_filter_removes_samples_without_ending_the_epoch() {
+  # A filter that rejects the very first sample is the case a naive
+  # implementation gets wrong by returning None and stopping.
+  let p = pipe.batch(
+    pipe.filter(pipe.from_source(counting_source(10)), "odd", 1, fn(s: smp.Sample) -> Bool = s.id % 2 == 1),
+    2, false)
+  let ids = collect(p, 100)
+  t.equal_i64("five odd samples survived", len(ids), 5)
+  t.equal_i64("the first survivor is one", ids[0], 1)
+}
+
+fn a_map_sees_every_sample_and_preserves_its_id() {
+  let p = pipe.batch(
+    pipe.map(pipe.from_source(counting_source(6)), "double", 1,
+      fn(s: smp.Sample) -> smp.Sample = smp.Sample { x: [s.x[0] * 2.0], shape: s.shape, y: s.y, id: s.id }),
+    2, false)
+  let it = pipe.iterate(p)
+  match pipe.next_batch(it) {
+    Opt.None => t.check("a batch was produced", false),
+    Opt.Some(b) => {
+      t.near("the map applied", b.x[0], 0.0, 1.0e-12)
+      t.near("the map applied to the second", b.x[1], 2.0, 1.0e-12)
+      t.equal_i64("the id survived the map", b.ids[1], 1)
+    },
+  }
+}
+
+fn shuffling_changes_the_order_and_loses_nothing() {
+  let p = pipe.batch(pipe.shuffle(pipe.from_source(counting_source(200)), 64, 7), 8, false)
+  let ids = collect(p, 100)
+  t.equal_i64("every sample still came through", len(ids), 200)
+  let ordered = true
+  let i: I64 = 1
+  while i < len(ids) {
+    if ids[i] < ids[i - 1] { ordered = false }
+    i = i + 1
+  }
+  t.check("the order changed", !ordered)
+  let seen: Arr[I64] = []
+  let j: I64 = 0
+  while j < 200 {
+    seen.push(0)
+    j = j + 1
+  }
+  let k: I64 = 0
+  while k < len(ids) {
+    seen[ids[k]] = seen[ids[k]] + 1
+    k = k + 1
+  }
+  let each_once = true
+  let m: I64 = 0
+  while m < 200 {
+    if seen[m] != 1 { each_once = false }
+    m = m + 1
+  }
+  t.check("no sample was duplicated or dropped", each_once)
+}
+
+fn the_same_seed_gives_the_same_order_and_a_different_seed_does_not() {
+  let a = collect(pipe.batch(pipe.shuffle(pipe.from_source(counting_source(100)), 32, 11), 4, false), 100)
+  let b = collect(pipe.batch(pipe.shuffle(pipe.from_source(counting_source(100)), 32, 11), 4, false), 100)
+  let c = collect(pipe.batch(pipe.shuffle(pipe.from_source(counting_source(100)), 32, 12), 4, false), 100)
+  t.check("two runs with one seed agree", same(a, b))
+  t.check("a different seed gives a different order", !same(a, c))
+}
+
+fn repeat_runs_the_source_the_requested_number_of_times() {
+  let p = pipe.batch(pipe.repeat(pipe.from_source(counting_source(5)), 3), 5, false)
+  t.equal_i64("three epochs of five", len(collect(p, 100)), 15)
+}
+
+fn the_order_check_names_shuffle_after_batch() {
+  # The whole reason `validate` exists. This ordering does not crash and does
+  # not fail loudly; it trains a worse model.
+  let bad = pipe.shuffle(pipe.batch(pipe.from_source(counting_source(10)), 4, false), 16, 1)
+  let warnings = pipe.validate(bad)
+  t.check("the suspicious order was reported", len(warnings) >= 1)
+
+  let good = pipe.batch(pipe.shuffle(pipe.from_source(counting_source(10)), 16, 1), 4, false)
+  t.equal_i64("the sensible order is quiet", len(pipe.validate(good)), 0)
+}
+
+fn the_order_check_names_shuffle_after_repeat() {
+  let p = pipe.shuffle(pipe.repeat(pipe.from_source(counting_source(10)), 2), 8, 1)
+  t.check("shuffle after repeat was reported", len(pipe.validate(p)) >= 1)
+}
+
+fn the_description_distinguishes_pipelines_that_differ_and_only_those() {
+  let base = pipe.map(pipe.from_source(counting_source(10)), "norm", 1, fn(s: smp.Sample) -> smp.Sample = s)
+  let same_again = pipe.map(pipe.from_source(counting_source(10)), "norm", 1, fn(s: smp.Sample) -> smp.Sample = s)
+  let bumped = pipe.map(pipe.from_source(counting_source(10)), "norm", 2, fn(s: smp.Sample) -> smp.Sample = s)
+  let renamed = pipe.map(pipe.from_source(counting_source(10)), "standardise", 1, fn(s: smp.Sample) -> smp.Sample = s)
+  t.equal_str("the same chain describes the same", pipe.describe(base), pipe.describe(same_again))
+  t.check("a version bump changes the description", pipe.describe(base) != pipe.describe(bumped))
+  t.check("a rename changes the description", pipe.describe(base) != pipe.describe(renamed))
+}
+
+fn same(a: Arr[I64], b: Arr[I64]) -> Bool {
+  if len(a) != len(b) { return false }
+  let i: I64 = 0
+  while i < len(a) {
+    if a[i] != b[i] { return false }
+    i = i + 1
+  }
+  true
+}
+
+a_plain_pass_yields_every_sample_once_in_order()
+the_final_short_batch_is_kept_unless_drop_last_is_asked_for()
+a_filter_removes_samples_without_ending_the_epoch()
+a_map_sees_every_sample_and_preserves_its_id()
+shuffling_changes_the_order_and_loses_nothing()
+the_same_seed_gives_the_same_order_and_a_different_seed_does_not()
+repeat_runs_the_source_the_requested_number_of_times()
+the_order_check_names_shuffle_after_batch()
+the_order_check_names_shuffle_after_repeat()
+the_description_distinguishes_pipelines_that_differ_and_only_those()
+t.report("pipeline")

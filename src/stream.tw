@@ -1,0 +1,182 @@
+# stream.tw - data that does not fit in memory.
+#
+# The pipeline in `pipeline.tw` addresses its source by index, which needs the
+# whole dataset to be indexable. A 400 gigabyte file of records is not. This
+# file is the other shape: a cursor that reads forward through a file in fixed
+# chunks and hands out samples as it finds them.
+#
+# What is given up by streaming is stated rather than papered over:
+#
+#   - No count. `len` on a stream would require a full pass, so a stream has no
+#     length and a progress bar over one cannot show a percentage. warp does not
+#     estimate it from the file size, because a wrong estimate is worse than
+#     none for the one thing a progress bar is for.
+#   - No random access, therefore no true shuffle. The reservoir in
+#     `pipeline.tw` is the approximation, and its buffer size is the whole of the
+#     quality of it. See the warning there about data sorted by class.
+#   - One pass unless the file can be reopened. `repeat` on a stream reopens and
+#     starts again, which is only correct if the file has not changed. warp
+#     records the size and modification time at open and refuses a reopen that
+#     does not match, because half a run trained on one file and half on another
+#     is a result nobody can interpret.
+#
+# The chunk size is the one tuning knob and it is deliberately large. A read
+# syscall per record makes the loader slower than the model, and the fix is to
+# read a megabyte and split it in memory.
+
+mode systems
+
+import "strutil.tw" as sx
+import "sample.tw" as smp
+
+let CHUNK: I64 = 1048576
+
+struct Stream {
+  path: Str,
+  offset: I64,       # byte offset of the next unread byte
+  # Bytes read but not yet consumed. A record that straddles a chunk boundary
+  # lives here until the rest of it arrives, which is the entire reason this
+  # field exists and the single most common bug in a chunked reader.
+  pending: Str,
+  eof: Bool,
+  size_at_open: I64,
+  mtime_at_open: I64,
+  # Records emitted so far, which is the only count a stream can honestly give.
+  emitted: I64,
+}
+
+fn open(path: Str) -> Stream = Stream {
+  path: path,
+  offset: 0,
+  pending: "",
+  eof: false,
+  size_at_open: file_size(path),
+  mtime_at_open: mtime(path),
+  emitted: 0,
+}
+
+# Reopen for another pass, refusing if the file changed underneath. The refusal
+# is the point: silently continuing means epoch 1 and epoch 2 trained on
+# different data and nothing in the run records which.
+fn reopen(s: Stream) -> Res[Stream, Str] {
+  if file_size(s.path) != s.size_at_open {
+    return Res.Err(s.path + " changed size during the run; a second pass would read different data")
+  }
+  if mtime(s.path) != s.mtime_at_open {
+    return Res.Err(s.path + " was modified during the run; a second pass would read different data")
+  }
+  Res.Ok(Stream {
+    path: s.path, offset: 0, pending: "", eof: false,
+    size_at_open: s.size_at_open, mtime_at_open: s.mtime_at_open, emitted: 0,
+  })
+}
+
+# The next line, or none at the end. Lines rather than records because every
+# streamable text format warp reads, CSV and JSON lines, is line delimited, and
+# a format that is not gets its own reader rather than a generalisation of this
+# one that fits neither.
+fn next_line(s: Stream) -> Opt[Str] {
+  while true {
+    let nl = index_of_byte(s.pending, 10)
+    if nl >= 0 {
+      let line = slice(s.pending, 0, nl)
+      s.pending = slice(s.pending, nl + 1, len(s.pending))
+      s.emitted = s.emitted + 1
+      return Opt.Some(strip_cr(line))
+    }
+    if s.eof {
+      # A final line with no trailing newline is still a line. Dropping it loses
+      # the last record of any file not written with a trailing newline, which
+      # is a silent off-by-one in the dataset size.
+      if len(s.pending) > 0 {
+        let last = s.pending
+        s.pending = ""
+        s.emitted = s.emitted + 1
+        return Opt.Some(strip_cr(last))
+      }
+      return Opt.None
+    }
+    fill(s)
+  }
+  Opt.None
+}
+
+fn fill(s: Stream) {
+  match read_file_at(s.path, s.offset, CHUNK) {
+    Res.Err(_) => s.eof = true,
+    Res.Ok(chunk) => {
+      if len(chunk) == 0 {
+        s.eof = true
+      } else {
+        s.pending = s.pending + chunk
+        s.offset = s.offset + len(chunk)
+      }
+    },
+  }
+}
+
+fn strip_cr(line: Str) -> Str =
+  if len(line) > 0 && line[len(line) - 1] == 13 { slice(line, 0, len(line) - 1) } else { line }
+
+fn index_of_byte(s: Str, b: I64) -> I64 {
+  let i: I64 = 0
+  while i < len(s) {
+    if s[i] == b { return i }
+    i = i + 1
+  }
+  0 - 1
+}
+
+# ── A CSV stream ────────────────────────────────────────────────────────────
+
+struct CsvStream {
+  s: Stream,
+  header: Arr[Str],
+  label_col: I64,
+  shape: Arr[I64],
+}
+
+fn open_csv(path: Str, label_col: I64) -> CsvStream {
+  let st = open(path)
+  let header: Arr[Str] = []
+  match next_line(st) {
+    Opt.Some(line) => header = sx.split_on(line, 44),
+    Opt.None => {},
+  }
+  # The feature count comes from the header rather than from the first row,
+  # so a first row with a missing trailing field is a parse error naming the
+  # row rather than a dataset whose width is silently one less.
+  CsvStream { s: st, header: header, label_col: label_col, shape: [len(header) - 1] }
+}
+
+fn next_sample(c: CsvStream) -> Opt[smp.Sample] {
+  match next_line(c.s) {
+    Opt.None => Opt.None,
+    Opt.Some(line) => {
+      if len(line) == 0 { return next_sample(c) }
+      let fields = sx.split_on(line, 44)
+      if len(fields) != len(c.header) { return Opt.None }
+      let x: Arr[F64] = []
+      let y = 0.0
+      let i: I64 = 0
+      while i < len(fields) {
+        if i == c.label_col {
+          y = sx.parse_f64(fields[i])
+        } else {
+          x.push(sx.parse_f64(fields[i]))
+        }
+        i = i + 1
+      }
+      Opt.Some(smp.Sample { x: x, shape: c.shape, y: y, id: c.s.emitted - 1 })
+    },
+  }
+}
+
+# How far through the file the cursor is, in thousandths. Offered instead of a
+# record count because the byte position is known exactly and the record count
+# is not, and a progress readout that is exact about the wrong quantity is the
+# usual compromise here.
+fn progress_x1000(s: Stream) -> I64 {
+  if s.size_at_open <= 0 { return 0 }
+  s.offset * 1000 / s.size_at_open
+}

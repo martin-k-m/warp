@@ -1,0 +1,296 @@
+# cache.tw - materialised pipeline output, keyed on the transformation chain.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# WHY THE KEY IS WHAT IT IS
+#
+# A cache of preprocessed data is easy to build and easy to get catastrophically
+# wrong. The failure is not a crash. It is that someone changes a normalisation
+# constant, reruns, and trains on last week's numbers, and the only symptom is
+# that the result does not reproduce. Weeks are lost to this.
+#
+# So the key is a hash of the *whole transformation chain*, not of the output
+# and not of the source alone:
+#
+#     key = sha256(source name + source version + source size
+#                  + every stage that can change a sample's value, in order)
+#
+# Point by point, because each one is a decision:
+#
+# 1. THE CHAIN, NOT THE OUTPUT. Hashing the output means producing the output,
+#    which is the work the cache exists to avoid. The key has to be computable
+#    before the work, so it is computed from the description of the work.
+#
+# 2. IN ORDER. `normalise` then `crop` is not `crop` then `normalise`. A key
+#    built from an unordered set of stage names calls those the same pipeline
+#    and they are not.
+#
+# 3. EVERY STAGE THAT CAN CHANGE A VALUE, AND NOTHING ELSE. `batch` and
+#    `prefetch` and `repeat` do not change what any sample contains, so they are
+#    excluded, and changing the batch size therefore does not throw away an hour
+#    of decoding. `shuffle` is included, with its seed, because the cached
+#    artefact is a sequence and its order is part of it.
+#
+# 4. THE STAGE'S NAME AND VERSION, BECAUSE A FUNCTION CANNOT BE HASHED. There is
+#    no way for a program to hash the behaviour of a function value it was
+#    handed. This is the hard limit of the whole design and it cannot be
+#    engineered around: two different functions can be indistinguishable to
+#    anything except by running them on every possible input.
+#
+#    The obligation is therefore on the caller, and warp states it rather than
+#    hiding it: A STAGE THAT CHANGES BEHAVIOUR MUST CHANGE ITS NAME OR RAISE ITS
+#    VERSION. That is why `map` and `filter` take both, and why neither has a
+#    default. A library that let you write `.map(f)` with no name would be
+#    silently wrong the first time anyone edited `f`, and it would look like it
+#    worked.
+#
+#    `is_fresh` below is the safety net for the case people actually
+#    hit, which is editing the code and forgetting the version bump.
+#
+# 5. THE SOURCE'S SIZE. Appending a thousand rows to the input file changes
+#    neither the source name nor any stage, and it changes the answer. The
+#    count is cheap to read and catches the common case. It does not catch an
+#    edit in place that keeps the length, which is what the source version field
+#    is for and why datasets carry a checksum.
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# The cache is content-addressed and append-only: entries are written under
+# their key and never edited. Invalidation is therefore not a deletion but a
+# miss, and two versions of a pipeline can coexist while an experiment is
+# running. Reclaiming space is `prune`, which is explicit, because a cache that
+# evicts on its own will evict the artefact of the run that is currently going.
+
+mode systems
+
+import "../twill_modules/spool/src/sha256.tw" as sha
+import "strutil.tw" as sx
+import "pipeline.tw" as pipe
+import "sample.tw" as smp
+
+let FORMAT_VERSION: I64 = 1
+
+struct Cache {
+  dir: Str,
+  # The cache format itself is part of the key. A change to how warp writes an
+  # entry must not read back as a change to the user's data, and folding the
+  # format version in means an upgrade misses rather than misreads.
+  format: I64,
+}
+
+fn open(dir: Str) -> Cache = Cache { dir: dir, format: FORMAT_VERSION }
+
+# The key for a pipeline. Everything that goes into it is in the string, so a
+# key can be explained: `explain` returns the exact input that was hashed, and
+# a user asking "why did my cache miss" gets a diff instead of a hex string.
+fn key(c: Cache, p: pipe.Pipeline) -> Str = sha.hash_str(explain(c, p))
+
+fn explain(c: Cache, p: pipe.Pipeline) -> Str {
+  let out = "warp-cache v" + str(c.format) + "\n"
+  out = out + "source " + p.source.name + " v" + str(p.source.version) +
+    " n" + str(p.source.count) + "\n"
+  let i: I64 = 0
+  while i < len(p.stages) {
+    let st = p.stages[i]
+    if affects_values(st) {
+      out = out + pipe.describe_stage(st) + "\n"
+    }
+    i = i + 1
+  }
+  out
+}
+
+# Point 3 above, as a function. Batching, prefetching and repeating change how
+# samples are grouped, buffered and how often they are produced, and none of
+# them changes what a sample contains.
+fn affects_values(st: pipe.Stage) -> Bool {
+  if st.kind == pipe.BATCH { return false }
+  if st.kind == pipe.PREFETCH { return false }
+  if st.kind == pipe.REPEAT { return false }
+  true
+}
+
+fn path_of(c: Cache, k: Str) -> Str = c.dir + "/" + slice(k, 0, 2) + "/" + k + ".warp"
+
+fn manifest_of(c: Cache, k: Str) -> Str = c.dir + "/" + slice(k, 0, 2) + "/" + k + ".toml"
+
+# ── Reading and writing ─────────────────────────────────────────────────────
+
+struct Entry {
+  key: Str,
+  count: I64,
+  stride: I64,
+  shape: Arr[I64],
+  # The description that produced the key, stored beside the data. Storing it
+  # costs a few hundred bytes and it is what makes a stale entry diagnosable
+  # rather than mysterious: `spool`-style, the artefact carries the reason it
+  # exists.
+  chain: Str,
+}
+
+fn has(c: Cache, p: pipe.Pipeline) -> Bool = path_exists(path_of(c, key(c, p)))
+
+fn write(c: Cache, p: pipe.Pipeline, batches: Arr[smp.Batch]) -> Str {
+  let k = key(c, p)
+  mkdir_all(c.dir + "/" + slice(k, 0, 2))
+  # Written to a temporary name and renamed into place. A cache entry that is
+  # half written when a run is interrupted is worse than no entry, because its
+  # key says it is complete and every later run will read it.
+  let tmp = path_of(c, k) + ".partial"
+  let body = encode(batches)
+  write_file(tmp, body)
+  rename(tmp, path_of(c, k))
+  write_file(manifest_of(c, k), explain(c, p))
+  k
+}
+
+fn read(c: Cache, p: pipe.Pipeline) -> Opt[Arr[smp.Batch]] {
+  let k = key(c, p)
+  if !path_exists(path_of(c, k)) { return Opt.None }
+  match read_file(path_of(c, k)) {
+    Res.Err(_) => Opt.None,
+    Res.Ok(bytes) => decode(bytes),
+  }
+}
+
+# The safety net for point 4. If any source file that defines the pipeline is
+# newer than the cache entry, the entry is treated as a miss even when the key
+# matches. This catches the case that actually happens: someone edits a
+# transform and does not raise its version.
+#
+# It is deliberately conservative in one direction only. A false miss costs
+# recomputation. A false hit costs a wrong experiment, and the person paying for
+# it does not find out for a week.
+fn is_fresh(c: Cache, p: pipe.Pipeline, sources: Arr[Str]) -> Bool {
+  let k = key(c, p)
+  if !path_exists(path_of(c, k)) { return false }
+  let entry_time = mtime(path_of(c, k))
+  let i: I64 = 0
+  while i < len(sources) {
+    if mtime(sources[i]) > entry_time { return false }
+    i = i + 1
+  }
+  true
+}
+
+# ── Encoding ────────────────────────────────────────────────────────────────
+#
+# A flat text format, one value per field, chosen over a binary one because warp
+# has no reason to be faster than the disk and a cache whose contents can be
+# read with `head` is a cache people trust. If profiling ever says otherwise,
+# twill has `save` and `load` in the numeric half and this is the one function
+# that would change.
+
+fn encode(batches: Arr[smp.Batch]) -> Str {
+  let out = "warp " + str(FORMAT_VERSION) + " " + str(len(batches)) + "\n"
+  let i: I64 = 0
+  while i < len(batches) {
+    let b = batches[i]
+    out = out + "batch " + str(b.n) + " " + str(len(b.shape)) + "\n"
+    out = out + join_i64(b.shape) + "\n"
+    out = out + join_f64(b.x) + "\n"
+    out = out + join_f64(b.y) + "\n"
+    out = out + join_i64(b.ids) + "\n"
+    i = i + 1
+  }
+  out
+}
+
+fn decode(body: Str) -> Opt[Arr[smp.Batch]] {
+  let lines = sx.split_lines(body)
+  if len(lines) == 0 { return Opt.None }
+  let head = sx.split_spaces(lines[0])
+  if len(head) != 3 { return Opt.None }
+  if head[0] != "warp" { return Opt.None }
+  # A format version from the future is a miss, not an error. The cache is
+  # derived data and refusing to start because of it would make an upgrade a
+  # manual cleanup.
+  if sx.parse_i64(head[1]) != FORMAT_VERSION { return Opt.None }
+  let out: Arr[smp.Batch] = []
+  let n = sx.parse_i64(head[2])
+  let cursor: I64 = 1
+  let i: I64 = 0
+  while i < n {
+    if cursor + 4 >= len(lines) { return Opt.None }
+    let meta = sx.split_spaces(lines[cursor])
+    let shape = parse_i64s(lines[cursor + 1])
+    let x = parse_f64s(lines[cursor + 2])
+    let y = parse_f64s(lines[cursor + 3])
+    let ids = parse_i64s(lines[cursor + 4])
+    out.push(smp.Batch { x: x, y: y, ids: ids, n: sx.parse_i64(meta[1]), shape: shape })
+    cursor = cursor + 5
+    i = i + 1
+  }
+  Opt.Some(out)
+}
+
+# ── Maintenance ─────────────────────────────────────────────────────────────
+
+# Remove entries older than `keep_days`. Explicit, and never run as a side
+# effect of a read: an automatic eviction policy will eventually evict the
+# artefact of the run that is currently reading it, and the failure is a run
+# that dies at hour five.
+fn prune(c: Cache, keep_days: I64, now: I64) -> I64 {
+  let removed: I64 = 0
+  let entries = list_dir(c.dir)
+  let i: I64 = 0
+  while i < len(entries) {
+    let sub = c.dir + "/" + entries[i]
+    let files = list_dir(sub)
+    let j: I64 = 0
+    while j < len(files) {
+      let f = sub + "/" + files[j]
+      if now - mtime(f) > keep_days * 86400 {
+        remove_all(f)
+        removed = removed + 1
+      }
+      j = j + 1
+    }
+    i = i + 1
+  }
+  removed
+}
+
+# ── Small parsing helpers ───────────────────────────────────────────────────
+
+fn join_f64(xs: Arr[F64]) -> Str {
+  let out = ""
+  let i: I64 = 0
+  while i < len(xs) {
+    if i > 0 { out = out + " " }
+    out = out + str(xs[i])
+    i = i + 1
+  }
+  out
+}
+
+fn join_i64(xs: Arr[I64]) -> Str {
+  let out = ""
+  let i: I64 = 0
+  while i < len(xs) {
+    if i > 0 { out = out + " " }
+    out = out + str(xs[i])
+    i = i + 1
+  }
+  out
+}
+
+fn parse_f64s(line: Str) -> Arr[F64] {
+  let parts = sx.split_spaces(line)
+  let out: Arr[F64] = []
+  let i: I64 = 0
+  while i < len(parts) {
+    out.push(sx.parse_f64(parts[i]))
+    i = i + 1
+  }
+  out
+}
+
+fn parse_i64s(line: Str) -> Arr[I64] {
+  let parts = sx.split_spaces(line)
+  let out: Arr[I64] = []
+  let i: I64 = 0
+  while i < len(parts) {
+    out.push(sx.parse_i64(parts[i]))
+    i = i + 1
+  }
+  out
+}

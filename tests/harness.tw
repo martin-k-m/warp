@@ -1,0 +1,65 @@
+mode systems
+
+# A test harness, in twill.
+#
+# The same shape as spool's and weft's: there is no test runner in the toolchain, so a test
+# file is a program that calls these and ends with `report`, which exits
+# non-zero if anything failed. That is enough to be a CI gate the day
+# `mode systems` runs, and nothing more is worth building before then.
+#
+# Test names are sentences, because the name of a failing test is the only
+# documentation anyone reads at the moment it fails.
+
+struct Counter {
+  passed: I64,
+  failed: I64,
+}
+
+let TESTS = Counter { passed: 0, failed: 0 }
+
+fn check(name: Str, ok: Bool) {
+  if ok {
+    TESTS.passed = TESTS.passed + 1
+  } else {
+    TESTS.failed = TESTS.failed + 1
+    print("FAIL " + name)
+  }
+}
+
+fn equal_str(name: Str, got: Str, want: Str) {
+  if got == want {
+    TESTS.passed = TESTS.passed + 1
+  } else {
+    TESTS.failed = TESTS.failed + 1
+    print("FAIL " + name)
+    print("  got:  " + got)
+    print("  want: " + want)
+  }
+}
+
+fn equal_i64(name: Str, got: I64, want: I64) {
+  equal_str(name, str(got), str(want))
+}
+
+# Floats are compared with a tolerance and the tolerance is always stated by the
+# caller. A default epsilon hides the one thing worth knowing about a numeric
+# test, which is how close it actually came.
+fn near(name: Str, got: F64, want: F64, tol: F64) {
+  if abs_f(got - want) <= tol {
+    TESTS.passed = TESTS.passed + 1
+  } else {
+    TESTS.failed = TESTS.failed + 1
+    print("FAIL " + name)
+    print("  got:  " + str(got))
+    print("  want: " + str(want) + " within " + str(tol))
+  }
+}
+
+fn report(suite: Str) {
+  print(suite + ": " + str(TESTS.passed) + " passed, " + str(TESTS.failed) + " failed")
+  if TESTS.failed > 0 {
+    exit(1)
+  }
+}
+
+fn abs_f(v: F64) -> F64 = if v < 0.0 { 0.0 - v } else { v }

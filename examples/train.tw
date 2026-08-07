@@ -1,0 +1,96 @@
+# A full input pipeline: verify, load, augment, shuffle, batch, cache.
+#
+# The order of the calls is the order of the stages, and it is the point of the
+# example. Read the header of src/pipeline.tw before changing it.
+
+mode systems
+
+import "../src/pipeline.tw" as pipe
+import "../src/datasets.tw" as ds
+import "../src/augment.tw" as aug
+import "../src/cache.tw" as cache
+import "../src/rng.tw" as rng
+import "../src/sample.tw" as smp
+
+let RUN_SEED: I64 = 20260807
+let DATA_DIR: Str = "data/mnist"
+
+fn main() {
+  let d = ds.mnist()
+
+  # Verification first, and it refuses rather than warns. Training on the wrong
+  # bytes is not something a log line prevents.
+  let problem = ds.verify(d, DATA_DIR)
+  if len(problem) > 0 {
+    write_err("warp: " + problem + "\n")
+    exit(1)
+  }
+
+  let src = load_mnist(d)
+  let p = build(src, 0)
+
+  let warnings = pipe.validate(p)
+  let w: I64 = 0
+  while w < len(warnings) {
+    write_err("warp: " + warnings[w] + "\n")
+    w = w + 1
+  }
+
+  let c = cache.open(".warp-cache")
+  # The chain that produced this data, in the form that was hashed. Printing it
+  # costs a few lines of a log and turns "why did it recompute" into an answer.
+  write_out(cache.explain(c, p) + "\n")
+
+  let it = pipe.iterate(p)
+  while true {
+    match pipe.next_batch(it) {
+      Opt.None => return,
+      Opt.Some(b) => train_step(b),
+    }
+  }
+}
+
+fn build(src: pipe.Source, epoch: I64) -> pipe.Pipeline {
+  let p = pipe.from_source(src)
+
+  # The name and version are the stage's identity in the cache key. Change what
+  # the function does and this version must go up, or the next run trains on
+  # data produced by the old one.
+  p = pipe.map(p, "crop-28-pad-2", 1, fn(s: smp.Sample) -> smp.Sample =
+    aug.random_crop(s, 28, 28, 2, rng.seed_for(RUN_SEED, epoch, s.id)))
+
+  # Shuffle, then batch. Batching first would give every batch the same 128
+  # samples for the whole run, and on MNIST as distributed the file is not
+  # sorted by class, so it would look fine.
+  p = pipe.shuffle(p, 10000, RUN_SEED)
+  p = pipe.batch(p, 128, false)
+  # Last, so it buffers finished batches rather than half-processed samples.
+  p = pipe.prefetch(p, 2)
+  p
+}
+
+fn load_mnist(d: ds.Dataset) -> pipe.Source {
+  # The files ship gzipped and twill cannot decompress them, so the example
+  # reads the decompressed pair. See docs/needs.md.
+  let images = read_idx_or_die(DATA_DIR + "/train-images-idx3-ubyte")
+  let labels = read_idx_or_die(DATA_DIR + "/train-labels-idx1-ubyte")
+  ds.idx_source("mnist-train", images, labels, d.shape)
+}
+
+fn read_idx_or_die(path: Str) -> ds.Idx {
+  match read_file(path) {
+    Res.Err(e) => {
+      write_err("warp: cannot read " + path + ": " + e + "\n")
+      exit(1)
+    },
+    Res.Ok(body) => match ds.read_idx(body) {
+      Res.Err(e) => {
+        write_err("warp: " + path + ": " + e + "\n")
+        exit(1)
+      },
+      Res.Ok(idx) => idx,
+    },
+  }
+}
+
+main()

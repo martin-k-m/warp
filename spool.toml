@@ -1,0 +1,12 @@
+name = "warp"
+version = "0.1.0"
+entry = "src/pipeline.tw"
+
+# twill is here for the language itself. spool is a dependency for one file:
+# `src/sha256.tw`, which warp uses for cache keys and dataset verification.
+# Writing a second SHA-256 in twill would be two implementations of a digest
+# that must agree byte for byte across the toolchain, and the cost of depending
+# on spool is one vendored directory.
+[dependencies]
+twill = { version = "^1.2.0", git = "https://github.com/martin-k-m/twill" }
+spool = { version = "^0.1.0", git = "https://github.com/martin-k-m/spool" }

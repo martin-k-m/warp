@@ -1,0 +1,264 @@
+# datasets.tw - loaders for a few standard benchmarks.
+#
+# warp bundles no data. Every dataset here is described, not shipped: a name, an
+# origin, a licence, a list of files with their expected digests, and the code
+# to read the format once the file is on disk. Redistributing someone else's
+# corpus inside a package is a licensing decision that a data-loading library
+# has no business making on a user's behalf, and it puts hundreds of megabytes
+# in a repository that is otherwise a few thousand lines of text.
+#
+# ── ON THE DIGESTS ──────────────────────────────────────────────────────────
+#
+# Every file carries a `sha256` field and `verify` refuses to hand back a
+# dataset whose digest does not match. Where the field is the empty string the
+# digest is NOT YET PINNED, and `verify` refuses that too, printing the digest
+# it computed so it can be recorded.
+#
+# That is deliberate, and it is the honest state of this repository: a digest
+# copied from somewhere without checking it against the real file is worse than
+# no digest, because it looks like verification and is not. Pinning them is a
+# task that needs the files in hand, and it is in docs/datasets.md as an open
+# item rather than filled in with plausible hex.
+#
+# Refusing an unpinned dataset rather than warning is the same bias twill takes
+# elsewhere: when the signal is ambiguous, assume less. A warning in a training
+# log is not read.
+
+mode systems
+
+import "../twill_modules/spool/src/sha256.tw" as sha
+import "strutil.tw" as sx
+import "sample.tw" as smp
+import "pipeline.tw" as pipe
+
+struct File {
+  name: Str,
+  url: Str,
+  sha256: Str,     # empty means not yet pinned, which `verify` treats as a failure
+  bytes: I64,
+}
+
+struct Dataset {
+  name: Str,
+  # Where it came from and who made it. Kept in the code and not only in the
+  # documentation, so `warp list` can print the attribution and nobody has to go
+  # looking for it before publishing a result.
+  origin: Str,
+  citation: Str,
+  licence: Str,
+  files: Arr[File],
+  shape: Arr[I64],
+  classes: I64,
+}
+
+# ── MNIST ───────────────────────────────────────────────────────────────────
+
+fn mnist() -> Dataset = Dataset {
+  name: "mnist",
+  origin: "Yann LeCun and Corinna Cortes, Courant Institute and Google Labs.",
+  citation: "LeCun, Bottou, Bengio and Haffner, Gradient-based learning applied to document recognition, Proc. IEEE 86(11), 1998.",
+  # The MNIST page states CC BY-SA 3.0. The underlying NIST special databases
+  # are US government work; the derived split and normalisation are the authors'.
+  licence: "CC BY-SA 3.0",
+  files: [
+    File { name: "train-images-idx3-ubyte.gz", url: "https://storage.googleapis.com/cvdf-datasets/mnist/train-images-idx3-ubyte.gz", sha256: "", bytes: 9912422 },
+    File { name: "train-labels-idx1-ubyte.gz", url: "https://storage.googleapis.com/cvdf-datasets/mnist/train-labels-idx1-ubyte.gz", sha256: "", bytes: 28881 },
+    File { name: "t10k-images-idx3-ubyte.gz", url: "https://storage.googleapis.com/cvdf-datasets/mnist/t10k-images-idx3-ubyte.gz", sha256: "", bytes: 1648877 },
+    File { name: "t10k-labels-idx1-ubyte.gz", url: "https://storage.googleapis.com/cvdf-datasets/mnist/t10k-labels-idx1-ubyte.gz", sha256: "", bytes: 4542 },
+  ],
+  shape: [1, 28, 28],
+  classes: 10,
+}
+
+# ── Fashion-MNIST ───────────────────────────────────────────────────────────
+
+fn fashion_mnist() -> Dataset = Dataset {
+  name: "fashion-mnist",
+  origin: "Zalando Research.",
+  citation: "Xiao, Rasul and Vollgraf, Fashion-MNIST: a novel image dataset for benchmarking machine learning algorithms, arXiv:1708.07747, 2017.",
+  licence: "MIT",
+  files: [
+    File { name: "train-images-idx3-ubyte.gz", url: "https://github.com/zalandoresearch/fashion-mnist/raw/master/data/fashion/train-images-idx3-ubyte.gz", sha256: "", bytes: 26421880 },
+    File { name: "train-labels-idx1-ubyte.gz", url: "https://github.com/zalandoresearch/fashion-mnist/raw/master/data/fashion/train-labels-idx1-ubyte.gz", sha256: "", bytes: 29515 },
+    File { name: "t10k-images-idx3-ubyte.gz", url: "https://github.com/zalandoresearch/fashion-mnist/raw/master/data/fashion/t10k-images-idx3-ubyte.gz", sha256: "", bytes: 4422102 },
+    File { name: "t10k-labels-idx1-ubyte.gz", url: "https://github.com/zalandoresearch/fashion-mnist/raw/master/data/fashion/t10k-labels-idx1-ubyte.gz", sha256: "", bytes: 5148 },
+  ],
+  shape: [1, 28, 28],
+  classes: 10,
+}
+
+# ── CIFAR-10 ────────────────────────────────────────────────────────────────
+
+fn cifar10() -> Dataset = Dataset {
+  name: "cifar-10",
+  origin: "Alex Krizhevsky, Vinod Nair and Geoffrey Hinton, University of Toronto. A labelled subset of the 80 Million Tiny Images collection.",
+  citation: "Krizhevsky, Learning Multiple Layers of Features from Tiny Images, technical report, University of Toronto, 2009.",
+  # No licence is stated on the distribution page. The authors ask that the
+  # technical report be cited. That is not the same as a licence and warp says
+  # so rather than inventing one: check before redistributing anything derived
+  # from it.
+  licence: "not stated by the authors; cite the technical report. Confirm terms before redistribution.",
+  files: [
+    File { name: "cifar-10-binary.tar.gz", url: "https://www.cs.toronto.edu/~kriz/cifar-10-binary.tar.gz", sha256: "", bytes: 170052171 },
+  ],
+  shape: [3, 32, 32],
+  classes: 10,
+}
+
+# ── Iris ────────────────────────────────────────────────────────────────────
+#
+# Small enough to be useful in a test, and a reminder that a benchmark can carry
+# a history worth knowing: this one was published in a eugenics journal by an
+# author who was a proponent of it. Included because it is everywhere and people
+# should know what they are citing, not because it is recommended.
+
+fn iris() -> Dataset = Dataset {
+  name: "iris",
+  origin: "Ronald Fisher, 1936, from measurements by Edgar Anderson. Distributed by the UCI Machine Learning Repository.",
+  citation: "Fisher, The use of multiple measurements in taxonomic problems, Annals of Eugenics 7(2), 1936.",
+  licence: "CC BY 4.0 as distributed by UCI",
+  files: [
+    File { name: "iris.data", url: "https://archive.ics.uci.edu/static/public/53/iris.zip", sha256: "", bytes: 4551 },
+  ],
+  shape: [4],
+  classes: 3,
+}
+
+fn all() -> Arr[Dataset] = [mnist(), fashion_mnist(), cifar10(), iris()]
+
+# ── Verification ────────────────────────────────────────────────────────────
+
+# Check every file of a dataset in `dir`. Returns an empty string when all of
+# them match, and otherwise the first failure, spelled out.
+#
+# The size is checked before the digest because reading 170 megabytes to
+# discover that the download was an HTML error page is a slow way to learn it.
+fn verify(d: Dataset, dir: Str) -> Str {
+  let i: I64 = 0
+  while i < len(d.files) {
+    let f = d.files[i]
+    let path = dir + "/" + f.name
+    if !path_exists(path) {
+      return "missing " + path + "; download it from " + f.url
+    }
+    let size = file_size(path)
+    if size != f.bytes {
+      return f.name + " is " + str(size) + " bytes, expected " + str(f.bytes) +
+        ". A download that is much smaller than expected is usually an error page."
+    }
+    match read_file(path) {
+      Res.Err(e) => return "cannot read " + path + ": " + e,
+      Res.Ok(body) => {
+        let got = sha.hash_str(body)
+        if len(f.sha256) == 0 {
+          return f.name + " has no pinned digest in warp. Its sha256 is " + got +
+            ". Record it in src/datasets.tw and in docs/datasets.md before training on it."
+        }
+        if got != f.sha256 {
+          return f.name + " failed verification. Expected " + f.sha256 + ", got " + got +
+            ". Delete the file and download it again; if it fails twice, do not use it."
+        }
+      },
+    }
+    i = i + 1
+  }
+  ""
+}
+
+# ── The IDX format ──────────────────────────────────────────────────────────
+#
+# MNIST and Fashion-MNIST share it: a magic number encoding the element type and
+# the number of dimensions, then one big-endian 32-bit size per dimension, then
+# the data. Big-endian, which is worth stating because reading it as
+# little-endian gives a plausible number of images and a screen of noise.
+
+struct Idx {
+  dims: Arr[I64],
+  data: Str,     # the raw bytes, indexed directly rather than copied out
+  offset: I64,
+}
+
+fn read_idx(body: Str) -> Res[Idx, Str] {
+  if len(body) < 4 { return Res.Err("idx file is shorter than its header") }
+  if body[0] != 0 || body[1] != 0 {
+    return Res.Err("idx magic number is wrong; the file is not an idx file, or it is still compressed")
+  }
+  # Only unsigned bytes are supported, which is every file warp reads. Refusing
+  # the rest is better than a partial implementation that mangles one type.
+  if body[2] != 8 { return Res.Err("idx element type " + str(body[2]) + " is not supported; warp reads unsigned bytes only") }
+  let ndim = body[3]
+  let dims: Arr[I64] = []
+  let i: I64 = 0
+  while i < ndim {
+    dims.push(be32(body, 4 + i * 4))
+    i = i + 1
+  }
+  Res.Ok(Idx { dims: dims, data: body, offset: 4 + ndim * 4 })
+}
+
+fn be32(s: Str, at: I64) -> I64 = s[at] * 16777216 + s[at + 1] * 65536 + s[at + 2] * 256 + s[at + 3]
+
+# A source over an already-verified pair of IDX files. Pixels are scaled to
+# [0, 1] here and standardised later by a pipeline stage, so the scaling is part
+# of the format and the standardisation is part of the experiment, which is the
+# line the cache key is drawn along.
+fn idx_source(name: Str, images: Idx, labels: Idx, shape: Arr[I64]) -> pipe.Source {
+  let stride = smp.stride_of(shape)
+  pipe.Source {
+    name: name,
+    version: 1,
+    count: images.dims[0],
+    get: fn(i: I64) -> smp.Sample {
+      let x: Arr[F64] = []
+      let j: I64 = 0
+      while j < stride {
+        x.push(f64(images.data[images.offset + i * stride + j]) / 255.0)
+        j = j + 1
+      }
+      smp.Sample { x: x, shape: shape, y: f64(labels.data[labels.offset + i]), id: i }
+    },
+  }
+}
+
+# ── CSV ─────────────────────────────────────────────────────────────────────
+
+# For the small datasets, and for the user's own. Held in memory, unlike
+# `stream.tw`, because a source has to be indexable and something has to be.
+fn csv_source(name: Str, body: Str, label_col: I64) -> Res[pipe.Source, Str] {
+  let lines = sx.split_lines(body)
+  let rows: Arr[Arr[F64]] = []
+  let ys: Arr[F64] = []
+  let width: I64 = 0 - 1
+  let i: I64 = 0
+  while i < len(lines) {
+    let line = lines[i]
+    # Blank lines and comments are skipped, matching twill's own `read_csv`,
+    # which skips `#` lines. Two readers of the same format in one toolchain
+    # must agree about what a comment is.
+    if len(line) > 0 && line[0] != 35 {
+      let fields = sx.split_on(line, 44)
+      if width < 0 { width = len(fields) }
+      if len(fields) != width {
+        return Res.Err("row " + str(i + 1) + " has " + str(len(fields)) + " fields, expected " + str(width))
+      }
+      let x: Arr[F64] = []
+      let j: I64 = 0
+      while j < len(fields) {
+        if j == label_col {
+          ys.push(sx.parse_f64(fields[j]))
+        } else {
+          x.push(sx.parse_f64(fields[j]))
+        }
+        j = j + 1
+      }
+      rows.push(x)
+    }
+    i = i + 1
+  }
+  Res.Ok(pipe.Source {
+    name: name,
+    version: 1,
+    count: len(rows),
+    get: fn(i: I64) -> smp.Sample = smp.Sample { x: rows[i], shape: [width - 1], y: ys[i], id: i },
+  })
+}

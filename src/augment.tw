@@ -1,0 +1,268 @@
+# augment.tw - image and sequence transforms, each one seeded explicitly.
+#
+# Every transform here takes a seed as an argument. Not a generator, a seed: an
+# I64 the caller computed with `rng.seed_for(base, epoch, index)`. The reason is
+# that augmentation is part of the experiment. Two runs with the same run seed
+# must produce the same crops in the same order on any machine, in any order of
+# execution, with any number of workers, and a transform that draws from shared
+# state cannot promise that once the loading is parallel.
+#
+# The cost of the rule is visible in every signature and it is the point: you
+# cannot call one of these without deciding what its randomness depends on.
+#
+# All of these are pure. They return a new sample and never modify the one they
+# were given, because the input may be a cached buffer that other samples in the
+# batch also reference.
+
+mode systems
+
+import "sample.tw" as smp
+import "rng.tw" as rng
+
+# ── Images ──────────────────────────────────────────────────────────────────
+#
+# An image sample is [channels, height, width], matching twill's `conv2d`. The
+# transforms below read the shape rather than taking dimensions, so a mismatch
+# is caught here rather than producing a plausible picture of the wrong thing.
+
+fn channels(s: smp.Sample) -> I64 = s.shape[0]
+fn height(s: smp.Sample) -> I64 = s.shape[1]
+fn width(s: smp.Sample) -> I64 = s.shape[2]
+
+fn pixel(s: smp.Sample, c: I64, y: I64, x: I64) -> F64 =
+  s.x[c * height(s) * width(s) + y * width(s) + x]
+
+# A random crop of size out_h by out_w, with `pad` pixels of zero padding added
+# on every side first. Padding then cropping rather than cropping alone is the
+# standard recipe because it lets the crop see the edge of the image, and
+# without it the border pixels are used far less often than the middle ones.
+fn random_crop(s: smp.Sample, out_h: I64, out_w: I64, pad: I64, seed: I64) -> smp.Sample {
+  let r = rng.new(seed)
+  let h = height(s)
+  let w = width(s)
+  let top = rng.below(r, h + 2 * pad - out_h + 1) - pad
+  let left = rng.below(r, w + 2 * pad - out_w + 1) - pad
+  let c = channels(s)
+  let out: Arr[F64] = []
+  let ci: I64 = 0
+  while ci < c {
+    let y: I64 = 0
+    while y < out_h {
+      let x: I64 = 0
+      while x < out_w {
+        let sy = top + y
+        let sx = left + x
+        # Zero outside the image. Zero rather than edge replication because the
+        # data has already been standardised by the time this runs, so zero is
+        # the mean and the padding adds no signal. Replication would add a
+        # streak that the model can learn to detect.
+        let v = if sy < 0 || sx < 0 || sy >= h || sx >= w { 0.0 } else { pixel(s, ci, sy, sx) }
+        out.push(v)
+        x = x + 1
+      }
+      y = y + 1
+    }
+    ci = ci + 1
+  }
+  smp.Sample { x: out, shape: [c, out_h, out_w], y: s.y, id: s.id }
+}
+
+# A horizontal flip with probability p.
+#
+# Worth one sentence of warning, since this is the transform people apply by
+# default: it is wrong for any dataset where left and right mean something.
+# Text in an image, road signs, medical laterality, and chirality of any kind.
+# The library cannot know, so it flips when asked and says so here.
+fn random_flip_h(s: smp.Sample, p: F64, seed: I64) -> smp.Sample {
+  let r = rng.new(seed)
+  if !rng.chance(r, p) { return s }
+  let c = channels(s)
+  let h = height(s)
+  let w = width(s)
+  let out: Arr[F64] = []
+  let ci: I64 = 0
+  while ci < c {
+    let y: I64 = 0
+    while y < h {
+      let x: I64 = 0
+      while x < w {
+        out.push(pixel(s, ci, y, w - 1 - x))
+        x = x + 1
+      }
+      y = y + 1
+    }
+    ci = ci + 1
+  }
+  smp.Sample { x: out, shape: s.shape, y: s.y, id: s.id }
+}
+
+# Brightness and contrast, as one transform because applying them separately
+# means two seeds and two passes for an operation that is one affine map per
+# pixel. `contrast` scales around the image's own mean, so a low-contrast image
+# does not also get darker.
+fn random_brightness_contrast(s: smp.Sample, b_range: F64, c_range: F64, seed: I64) -> smp.Sample {
+  let r = rng.new(seed)
+  let brightness = (rng.unit(r) * 2.0 - 1.0) * b_range
+  let contrast = 1.0 + (rng.unit(r) * 2.0 - 1.0) * c_range
+  let mean = mean_of(s.x)
+  let out: Arr[F64] = []
+  let i: I64 = 0
+  while i < len(s.x) {
+    out.push((s.x[i] - mean) * contrast + mean + brightness)
+    i = i + 1
+  }
+  smp.Sample { x: out, shape: s.shape, y: s.y, id: s.id }
+}
+
+# Cutout: one square of zeros, placed anywhere, allowed to hang off the edge.
+# Allowing it off the edge is not laziness. If the square is always fully
+# inside, the corners of the image are never occluded and the augmentation is
+# systematically weaker there.
+fn cutout(s: smp.Sample, size: I64, seed: I64) -> smp.Sample {
+  let r = rng.new(seed)
+  let h = height(s)
+  let w = width(s)
+  let cy = rng.below(r, h)
+  let cx = rng.below(r, w)
+  let out = copy_of(s.x)
+  let c = channels(s)
+  let ci: I64 = 0
+  while ci < c {
+    let y = max_i(cy - size / 2, 0)
+    while y < min_i(cy + size / 2, h) {
+      let x = max_i(cx - size / 2, 0)
+      while x < min_i(cx + size / 2, w) {
+        out[ci * h * w + y * w + x] = 0.0
+        x = x + 1
+      }
+      y = y + 1
+    }
+    ci = ci + 1
+  }
+  smp.Sample { x: out, shape: s.shape, y: s.y, id: s.id }
+}
+
+# ── Sequences ───────────────────────────────────────────────────────────────
+#
+# A sequence sample is [length] or [length, features]. The transforms take the
+# length from the shape for the same reason the image ones do.
+
+fn seq_len(s: smp.Sample) -> I64 = s.shape[0]
+fn seq_features(s: smp.Sample) -> I64 = if len(s.shape) > 1 { s.shape[1] } else { 1 }
+
+# A window of `out_len` steps starting at a random offset. Contiguous, never a
+# random subset of positions: a model over a sequence is learning the order, and
+# a subsample with the gaps closed up presents a sequence that never occurred.
+fn random_window(s: smp.Sample, out_len: I64, seed: I64) -> smp.Sample {
+  let n = seq_len(s)
+  if out_len >= n { return s }
+  let r = rng.new(seed)
+  let start = rng.below(r, n - out_len + 1)
+  let fdim = seq_features(s)
+  let out: Arr[F64] = []
+  let i: I64 = 0
+  while i < out_len * fdim {
+    out.push(s.x[start * fdim + i])
+    i = i + 1
+  }
+  smp.Sample { x: out, shape: reshaped(s.shape, out_len), y: s.y, id: s.id }
+}
+
+# Additive gaussian noise, at a scale relative to the series' own standard
+# deviation rather than absolute. An absolute scale means the same call is a
+# rounding error on one feature and destroys another, and nobody notices until
+# the model ignores the second one.
+fn jitter(s: smp.Sample, relative_scale: F64, seed: I64) -> smp.Sample {
+  let r = rng.new(seed)
+  let sd = stddev_of(s.x)
+  let scale = sd * relative_scale
+  let out: Arr[F64] = []
+  let i: I64 = 0
+  while i < len(s.x) {
+    out.push(s.x[i] + gaussian(r) * scale)
+    i = i + 1
+  }
+  smp.Sample { x: out, shape: s.shape, y: s.y, id: s.id }
+}
+
+# Mask a contiguous run, the sequence counterpart of cutout. Contiguous rather
+# than scattered because scattered masking is trivially repaired by
+# interpolation from the neighbours, and the model learns the repair rather than
+# the task.
+fn time_mask(s: smp.Sample, max_run: I64, seed: I64) -> smp.Sample {
+  let r = rng.new(seed)
+  let n = seq_len(s)
+  let fdim = seq_features(s)
+  let run = rng.range(r, 1, max_run)
+  let start = rng.below(r, max_i(n - run + 1, 1))
+  let out = copy_of(s.x)
+  let i = start
+  while i < min_i(start + run, n) {
+    let f: I64 = 0
+    while f < fdim {
+      out[i * fdim + f] = 0.0
+      f = f + 1
+    }
+    i = i + 1
+  }
+  smp.Sample { x: out, shape: s.shape, y: s.y, id: s.id }
+}
+
+# Box-Muller. One of the two draws is discarded, which wastes half the
+# generator's output and keeps the function a pure map from a seed to one value.
+# Caching the second draw would make consecutive calls with unrelated seeds
+# correlated, which is exactly the property the seeding discipline is protecting.
+fn gaussian(r: rng.Rng) -> F64 {
+  let u1 = max_f(rng.unit(r), 1.0e-12)
+  let u2 = rng.unit(r)
+  sqrt(0.0 - 2.0 * log(u1)) * cos(6.283185307179586 * u2)
+}
+
+fn mean_of(xs: Arr[F64]) -> F64 {
+  if len(xs) == 0 { return 0.0 }
+  let s = 0.0
+  let i: I64 = 0
+  while i < len(xs) {
+    s = s + xs[i]
+    i = i + 1
+  }
+  s / f64(len(xs))
+}
+
+fn stddev_of(xs: Arr[F64]) -> F64 {
+  if len(xs) < 2 { return 0.0 }
+  let m = mean_of(xs)
+  let acc = 0.0
+  let i: I64 = 0
+  while i < len(xs) {
+    acc = acc + (xs[i] - m) * (xs[i] - m)
+    i = i + 1
+  }
+  # Divided by n - 1. The sample here is the sequence, not the population, and
+  # the difference matters on the short windows this is called on.
+  sqrt(acc / f64(len(xs) - 1))
+}
+
+fn copy_of(xs: Arr[F64]) -> Arr[F64] {
+  let out: Arr[F64] = []
+  let i: I64 = 0
+  while i < len(xs) {
+    out.push(xs[i])
+    i = i + 1
+  }
+  out
+}
+
+fn reshaped(shape: Arr[I64], n: I64) -> Arr[I64] {
+  let out: Arr[I64] = [n]
+  let i: I64 = 1
+  while i < len(shape) {
+    out.push(shape[i])
+    i = i + 1
+  }
+  out
+}
+
+fn max_i(a: I64, b: I64) -> I64 = if a > b { a } else { b }
+fn min_i(a: I64, b: I64) -> I64 = if a < b { a } else { b }
+fn max_f(a: F64, b: F64) -> F64 = if a > b { a } else { b }

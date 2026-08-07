@@ -1,0 +1,80 @@
+name: CI
+
+# Nothing here runs twill, because twill cannot run this code yet. What is left
+# is still worth gating on: the things that would quietly rot while the language
+# catches up.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Every source file is twill
+        run: |
+          bad=$(find src tests examples -type f ! -name '*.tw' || true)
+          if [ -n "$bad" ]; then
+            echo "not twill source:"
+            echo "$bad"
+            exit 1
+          fi
+
+      - name: No trace of the old name
+        run: |
+          # The needle is assembled from two halves so this workflow file is not
+          # itself a hit, which would make the check permanently red.
+          old_name="ras""ter"
+          old_ext="\.""ra\b"
+          if grep -rIn --exclude-dir=.git -- "$old_name" . ; then
+            echo "the old language name appears above"
+            exit 1
+          fi
+          if grep -rIn --exclude-dir=.git -- "$old_ext" . ; then
+            echo "the old file extension appears above"
+            exit 1
+          fi
+
+      - name: No em dashes
+        run: |
+          dash=$(printf '\xe2\x80\x94')
+          if grep -rIn --exclude-dir=.git -- "$dash" . ; then
+            echo "em dash found above"
+            exit 1
+          fi
+
+      - name: The README still says it does not run
+        run: |
+          grep -q "warp does not run yet" README.md
+
+      - name: Every test file is wired into the suite
+        run: |
+          for f in tests/*_test.tw; do
+            tail -n 1 "$f" | grep -q "t.report(" || { echo "$f does not end in t.report"; exit 1; }
+          done
+
+      - name: No dataset is bundled
+        run: |
+          # warp describes data, it does not ship it. A large binary appearing in
+          # the tree is either a committed dataset or a mistake, and both should
+          # stop the build.
+          big=$(find . -path ./.git -prune -o -type f -size +256k -print)
+          if [ -n "$big" ]; then
+            echo "large files in the tree:"
+            echo "$big"
+            exit 1
+          fi
+
+      - name: Every dataset states a licence
+        run: |
+          # An empty licence field means a dataset was added without anyone
+          # deciding whether it can be used, which is the one thing this file
+          # cannot leave to review.
+          if grep -n 'licence: ""' src/datasets.tw ; then
+            echo "a dataset has no licence recorded"
+            exit 1
+          fi

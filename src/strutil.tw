@@ -1,0 +1,170 @@
+# strutil.tw - the string handling every other file needs.
+#
+# Numbers are parsed here rather than by a builtin because the systems subset
+# has no number parsing: `str` goes one way and nothing comes back. Everything
+# warp reads, a CSV row, a cache entry, an IDX header, arrives as bytes and has
+# to become a number somewhere. See docs/needs.md.
+#
+# Both parsers are total. They return a value and a flag rather than failing,
+# because the caller is reading a line of a data file and needs to name the
+# line, which this file cannot do.
+
+mode systems
+
+let B_ZERO: I64 = 48
+let B_NINE: I64 = 57
+let B_MINUS: I64 = 45
+let B_PLUS: I64 = 43
+let B_DOT: I64 = 46
+let B_E: I64 = 101
+let B_E_UPPER: I64 = 69
+let B_SPACE: I64 = 32
+let B_TAB: I64 = 9
+let B_NEWLINE: I64 = 10
+let B_CR: I64 = 13
+
+struct ParsedI64 { value: I64, ok: Bool }
+struct ParsedF64 { value: F64, ok: Bool }
+
+fn is_digit(b: I64) -> Bool = b >= B_ZERO && b <= B_NINE
+
+fn parse_i64_checked(s: Str) -> ParsedI64 {
+  if len(s) == 0 { return ParsedI64 { value: 0, ok: false } }
+  let neg = s[0] == B_MINUS
+  let i = if neg || s[0] == B_PLUS { 1 } else { 0 }
+  if i >= len(s) { return ParsedI64 { value: 0, ok: false } }
+  let v: I64 = 0
+  while i < len(s) {
+    if !is_digit(s[i]) { return ParsedI64 { value: 0, ok: false } }
+    v = v * 10 + (s[i] - B_ZERO)
+    i = i + 1
+  }
+  ParsedI64 { value: if neg { 0 - v } else { v }, ok: true }
+}
+
+fn parse_i64(s: Str) -> I64 = parse_i64_checked(s).value
+
+# Decimal and exponent form. The fraction is accumulated as an integer and
+# divided once at the end rather than by adding digit / 10^k as it goes: the
+# repeated division rounds at every step and the error accumulates into the
+# eighth digit, which is visible when a cached value is compared against a
+# freshly computed one.
+fn parse_f64_checked(s: Str) -> ParsedF64 {
+  if len(s) == 0 { return ParsedF64 { value: 0.0, ok: false } }
+  let neg = s[0] == B_MINUS
+  let i = if neg || s[0] == B_PLUS { 1 } else { 0 }
+  let whole: I64 = 0
+  let seen = false
+  while i < len(s) && is_digit(s[i]) {
+    whole = whole * 10 + (s[i] - B_ZERO)
+    seen = true
+    i = i + 1
+  }
+  let frac: I64 = 0
+  let places: I64 = 0
+  if i < len(s) && s[i] == B_DOT {
+    i = i + 1
+    while i < len(s) && is_digit(s[i]) {
+      frac = frac * 10 + (s[i] - B_ZERO)
+      places = places + 1
+      seen = true
+      i = i + 1
+    }
+  }
+  if !seen { return ParsedF64 { value: 0.0, ok: false } }
+  let v = f64(whole) + f64(frac) / pow10(places)
+  if i < len(s) && (s[i] == B_E || s[i] == B_E_UPPER) {
+    i = i + 1
+    let eneg = i < len(s) && s[i] == B_MINUS
+    if i < len(s) && (s[i] == B_MINUS || s[i] == B_PLUS) { i = i + 1 }
+    let e: I64 = 0
+    let any = false
+    while i < len(s) && is_digit(s[i]) {
+      e = e * 10 + (s[i] - B_ZERO)
+      any = true
+      i = i + 1
+    }
+    if !any { return ParsedF64 { value: 0.0, ok: false } }
+    v = if eneg { v / pow10(e) } else { v * pow10(e) }
+  }
+  if i != len(s) { return ParsedF64 { value: 0.0, ok: false } }
+  ParsedF64 { value: if neg { 0.0 - v } else { v }, ok: true }
+}
+
+fn parse_f64(s: Str) -> F64 = parse_f64_checked(s).value
+
+fn pow10(n: I64) -> F64 {
+  let out = 1.0
+  let i: I64 = 0
+  while i < n {
+    out = out * 10.0
+    i = i + 1
+  }
+  out
+}
+
+fn split_lines(s: Str) -> Arr[Str] {
+  let out: Arr[Str] = []
+  let start: I64 = 0
+  let i: I64 = 0
+  while i < len(s) {
+    if s[i] == B_NEWLINE {
+      # A trailing carriage return is dropped. A CSV written on Windows and read
+      # on Linux otherwise ends every last field with a byte that turns a number
+      # into a parse failure, and the error names the wrong thing.
+      let end = if i > start && s[i - 1] == B_CR { i - 1 } else { i }
+      out.push(slice(s, start, end))
+      start = i + 1
+    }
+    i = i + 1
+  }
+  if start < len(s) { out.push(slice(s, start, len(s))) }
+  out
+}
+
+fn split_on(s: Str, sep: I64) -> Arr[Str] {
+  let out: Arr[Str] = []
+  let start: I64 = 0
+  let i: I64 = 0
+  while i <= len(s) {
+    if i == len(s) || s[i] == sep {
+      out.push(slice(s, start, i))
+      start = i + 1
+    }
+    i = i + 1
+  }
+  out
+}
+
+# Whitespace-separated fields, with runs collapsed. Distinct from `split_on`,
+# which keeps empty fields, because an empty field in a comma-separated row is a
+# missing value and an empty field between two spaces is nothing at all.
+fn split_spaces(s: Str) -> Arr[Str] {
+  let out: Arr[Str] = []
+  let start: I64 = 0
+  let i: I64 = 0
+  while i <= len(s) {
+    if i == len(s) || s[i] == B_SPACE || s[i] == B_TAB {
+      if i > start { out.push(slice(s, start, i)) }
+      start = i + 1
+    }
+    i = i + 1
+  }
+  out
+}
+
+fn ends_with(s: Str, suffix: Str) -> Bool =
+  len(s) >= len(suffix) && slice(s, len(s) - len(suffix), len(s)) == suffix
+
+fn starts_with(s: Str, prefix: Str) -> Bool =
+  len(s) >= len(prefix) && slice(s, 0, len(prefix)) == prefix
+
+fn contains(hay: Str, needle: Str) -> Bool {
+  let n = len(needle)
+  let i: I64 = 0
+  while i + n <= len(hay) {
+    if slice(hay, i, i + n) == needle { return true }
+    i = i + 1
+  }
+  false
+}

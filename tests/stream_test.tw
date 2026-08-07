@@ -1,0 +1,115 @@
+mode systems
+
+import "harness.tw" as t
+import "../src/stream.tw" as stream
+import "../src/strutil.tw" as sx
+
+# The chunked reader is tested through its splitting rather than through the
+# filesystem, because the bug this code exists to avoid is a record that
+# straddles a chunk boundary, and that is a property of the splitting.
+
+fn a_stream_holds_a_partial_record_until_the_rest_arrives() {
+  let s = stream.Stream {
+    path: "", offset: 0, pending: "alpha\nbet", eof: false,
+    size_at_open: 0, mtime_at_open: 0, emitted: 0,
+  }
+  match stream.next_line(s) {
+    Opt.None => t.check("the complete line was returned", false),
+    Opt.Some(line) => t.equal_str("the first line came out whole", line, "alpha"),
+  }
+  t.equal_str("the partial record is still held", s.pending, "bet")
+}
+
+fn a_final_line_without_a_newline_is_still_a_line() {
+  # Dropping it is a silent off-by-one in the dataset size, on any file not
+  # written with a trailing newline.
+  let s = stream.Stream {
+    path: "", offset: 0, pending: "only", eof: true,
+    size_at_open: 0, mtime_at_open: 0, emitted: 0,
+  }
+  match stream.next_line(s) {
+    Opt.None => t.check("the last line was returned", false),
+    Opt.Some(line) => t.equal_str("the unterminated line came out", line, "only"),
+  }
+  match stream.next_line(s) {
+    Opt.None => t.check("the stream then ended", true),
+    Opt.Some(_) => t.check("nothing came after it", false),
+  }
+}
+
+fn a_carriage_return_is_stripped_from_a_line() {
+  let s = stream.Stream {
+    path: "", offset: 0, pending: "a,b\r\n", eof: true,
+    size_at_open: 0, mtime_at_open: 0, emitted: 0,
+  }
+  match stream.next_line(s) {
+    Opt.None => t.check("a line came out", false),
+    Opt.Some(line) => t.equal_str("the carriage return is gone", line, "a,b"),
+  }
+}
+
+fn an_empty_stream_ends_rather_than_returning_an_empty_line() {
+  let s = stream.Stream {
+    path: "", offset: 0, pending: "", eof: true,
+    size_at_open: 0, mtime_at_open: 0, emitted: 0,
+  }
+  match stream.next_line(s) {
+    Opt.None => t.check("an empty stream is empty", true),
+    Opt.Some(_) => t.check("an empty stream must not yield a line", false),
+  }
+}
+
+fn the_emitted_count_is_the_only_count_a_stream_offers() {
+  let s = stream.Stream {
+    path: "", offset: 0, pending: "a\nb\nc\n", eof: true,
+    size_at_open: 0, mtime_at_open: 0, emitted: 0,
+  }
+  let n: I64 = 0
+  while n < 3 {
+    let _ = stream.next_line(s)
+    n = n + 1
+  }
+  t.equal_i64("three records were emitted", s.emitted, 3)
+}
+
+fn progress_is_reported_in_bytes_because_the_record_count_is_unknown() {
+  # A percentage derived from a guessed record count is exact about the wrong
+  # quantity, which is the usual compromise here and worse than none.
+  let s = stream.Stream {
+    path: "", offset: 250, pending: "", eof: false,
+    size_at_open: 1000, mtime_at_open: 0, emitted: 0,
+  }
+  t.equal_i64("a quarter of the bytes", stream.progress_x1000(s), 250)
+}
+
+fn progress_on_a_stream_of_unknown_size_is_zero_and_not_a_division_by_zero() {
+  let s = stream.Stream {
+    path: "", offset: 100, pending: "", eof: false,
+    size_at_open: 0, mtime_at_open: 0, emitted: 0,
+  }
+  t.equal_i64("an unknown size reports nothing", stream.progress_x1000(s), 0)
+}
+
+fn a_reopen_refuses_when_the_file_changed_underneath() {
+  # Half a run trained on one file and half on another is a result nobody can
+  # interpret, so a second pass over a changed file is refused rather than
+  # silently allowed.
+  let s = stream.Stream {
+    path: "/nonexistent/warp-test-file", offset: 0, pending: "", eof: true,
+    size_at_open: 12345, mtime_at_open: 999, emitted: 0,
+  }
+  match stream.reopen(s) {
+    Res.Ok(_) => t.check("a changed file must not reopen", false),
+    Res.Err(e) => t.check("the refusal names the file", sx.contains(e, "warp-test-file")),
+  }
+}
+
+a_stream_holds_a_partial_record_until_the_rest_arrives()
+a_final_line_without_a_newline_is_still_a_line()
+a_carriage_return_is_stripped_from_a_line()
+an_empty_stream_ends_rather_than_returning_an_empty_line()
+the_emitted_count_is_the_only_count_a_stream_offers()
+progress_is_reported_in_bytes_because_the_record_count_is_unknown()
+progress_on_a_stream_of_unknown_size_is_zero_and_not_a_division_by_zero()
+a_reopen_refuses_when_the_file_changed_underneath()
+t.report("stream")

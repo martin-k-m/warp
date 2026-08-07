@@ -1,0 +1,252 @@
+mode systems
+
+import "harness.tw" as t
+import "../src/augment.tw" as aug
+import "../src/rng.tw" as rng
+import "../src/sample.tw" as smp
+
+# A 1 by 4 by 4 image whose pixel values are their own position, so any crop,
+# flip or mask can be checked by reading the values rather than by counting.
+fn image() -> smp.Sample {
+  let x: Arr[F64] = []
+  let i: I64 = 0
+  while i < 16 {
+    x.push(f64(i))
+    i = i + 1
+  }
+  smp.Sample { x: x, shape: [1, 4, 4], y: 1.0, id: 3 }
+}
+
+fn sequence(n: I64) -> smp.Sample {
+  let x: Arr[F64] = []
+  let i: I64 = 0
+  while i < n {
+    x.push(f64(i))
+    i = i + 1
+  }
+  smp.Sample { x: x, shape: [n], y: 0.0, id: 1 }
+}
+
+fn the_same_seed_gives_the_same_augmentation() {
+  # The property the whole seeding discipline exists for. Without it a run
+  # cannot be replayed, and a run that cannot be replayed cannot be debugged.
+  let a = aug.random_crop(image(), 3, 3, 1, 42)
+  let b = aug.random_crop(image(), 3, 3, 1, 42)
+  t.check("two crops from one seed are identical", same(a.x, b.x))
+}
+
+fn a_different_seed_gives_a_different_augmentation() {
+  let found_difference = false
+  let s: I64 = 1
+  while s < 40 {
+    let a = aug.random_crop(image(), 2, 2, 0, 1)
+    let b = aug.random_crop(image(), 2, 2, 0, s)
+    if !same(a.x, b.x) { found_difference = true }
+    s = s + 1
+  }
+  t.check("some other seed crops elsewhere", found_difference)
+}
+
+fn a_seed_derived_per_sample_does_not_repeat_across_the_epoch_boundary() {
+  # Adding the epoch and the index instead of mixing them makes epoch 1 sample 2
+  # and epoch 2 sample 1 the same seed, and the resulting diagonal correlation
+  # is invisible in the loss curve.
+  t.check("epoch 1 sample 2 differs from epoch 2 sample 1",
+    rng.seed_for(9, 1, 2) != rng.seed_for(9, 2, 1))
+  t.check("a different run seed changes everything",
+    rng.seed_for(9, 1, 1) != rng.seed_for(10, 1, 1))
+  t.equal_i64("the same three inputs give the same seed",
+    rng.seed_for(9, 3, 77), rng.seed_for(9, 3, 77))
+}
+
+fn a_crop_has_the_size_it_was_asked_for() {
+  let c = aug.random_crop(image(), 3, 3, 1, 5)
+  t.equal_i64("nine values", len(c.x), 9)
+  t.equal_i64("the shape says three", c.shape[1], 3)
+  t.equal_i64("in both directions", c.shape[2], 3)
+}
+
+fn padding_outside_the_image_is_zero_and_not_a_repeated_edge() {
+  # Edge replication would add a streak the model can learn to detect.
+  let mostly_padding = aug.random_crop(image(), 8, 8, 4, 1)
+  let zeros: I64 = 0
+  let i: I64 = 0
+  while i < len(mostly_padding.x) {
+    if mostly_padding.x[i] == 0.0 { zeros = zeros + 1 }
+    i = i + 1
+  }
+  t.check("the padding is present as zeros", zeros > 16)
+}
+
+fn a_flip_reverses_each_row_and_leaves_the_label_alone() {
+  let f = aug.random_flip_h(image(), 1.0, 1)
+  t.near("the first pixel is now the last of its row", f.x[0], 3.0, 1.0e-12)
+  t.near("the last pixel is now the first of its row", f.x[3], 0.0, 1.0e-12)
+  t.near("the label is untouched", f.y, 1.0, 1.0e-12)
+  t.equal_i64("the id is untouched", f.id, 3)
+}
+
+fn a_flip_with_probability_zero_never_flips() {
+  let f = aug.random_flip_h(image(), 0.0, 99)
+  t.check("the image came back unchanged", same(f.x, image().x))
+}
+
+fn a_flip_twice_is_the_original() {
+  let once = aug.random_flip_h(image(), 1.0, 1)
+  let twice = aug.random_flip_h(once, 1.0, 1)
+  t.check("flipping twice restores the image", same(twice.x, image().x))
+}
+
+fn an_augmentation_does_not_modify_the_sample_it_was_given() {
+  # The input may be a cached buffer that other samples in the batch reference.
+  let original = image()
+  let before = original.x[0]
+  let _ = aug.cutout(original, 2, 1)
+  t.near("the input is untouched", original.x[0], before, 1.0e-12)
+}
+
+fn cutout_zeroes_a_region_and_leaves_the_rest() {
+  let c = aug.cutout(image(), 2, 3)
+  let zeros: I64 = 0
+  let i: I64 = 0
+  while i < len(c.x) {
+    if c.x[i] == 0.0 { zeros = zeros + 1 }
+    i = i + 1
+  }
+  # The first pixel is genuinely zero in this image, so at least one zero is
+  # expected even with no cut. More than one means the cut landed.
+  t.check("something was cut out", zeros >= 1)
+  t.equal_i64("the shape is unchanged", len(c.x), 16)
+}
+
+fn a_window_is_contiguous() {
+  # A random subset of positions with the gaps closed up presents a sequence
+  # that never occurred.
+  let w = aug.random_window(sequence(20), 5, 4)
+  t.equal_i64("five steps", len(w.x), 5)
+  let contiguous = true
+  let i: I64 = 1
+  while i < len(w.x) {
+    if w.x[i] - w.x[i - 1] != 1.0 { contiguous = false }
+    i = i + 1
+  }
+  t.check("the window is a run of the original", contiguous)
+}
+
+fn a_window_longer_than_the_sequence_returns_the_sequence() {
+  let w = aug.random_window(sequence(5), 10, 1)
+  t.equal_i64("nothing was invented to fill it", len(w.x), 5)
+}
+
+fn a_time_mask_zeroes_a_single_run() {
+  let m = aug.time_mask(sequence(20), 4, 7)
+  t.equal_i64("the length is unchanged", len(m.x), 20)
+  let runs: I64 = 0
+  let in_run = false
+  let i: I64 = 1
+  while i < len(m.x) {
+    let masked = m.x[i] == 0.0
+    if masked && !in_run { runs = runs + 1 }
+    in_run = masked
+    i = i + 1
+  }
+  t.check("at most one masked run", runs <= 1)
+}
+
+fn jitter_scales_with_the_series_and_not_absolutely() {
+  # An absolute scale is a rounding error on one feature and destroys another.
+  let small = aug.jitter(scaled(0.001), 0.1, 5)
+  let large = aug.jitter(scaled(1000.0), 0.1, 5)
+  let small_delta = abs_f(small.x[3] - 0.003)
+  let large_delta = abs_f(large.x[3] - 3000.0)
+  t.check("the perturbation grew with the series", large_delta > small_delta * 100.0)
+}
+
+fn scaled(k: F64) -> smp.Sample {
+  let x: Arr[F64] = []
+  let i: I64 = 0
+  while i < 10 {
+    x.push(f64(i) * k)
+    i = i + 1
+  }
+  smp.Sample { x: x, shape: [10], y: 0.0, id: 0 }
+}
+
+fn a_permutation_is_a_permutation() {
+  let r = rng.new(3)
+  let p = rng.permutation(r, 50)
+  let seen: Arr[I64] = []
+  let i: I64 = 0
+  while i < 50 {
+    seen.push(0)
+    i = i + 1
+  }
+  let j: I64 = 0
+  while j < len(p) {
+    seen[p[j]] = seen[p[j]] + 1
+    j = j + 1
+  }
+  let ok = true
+  let k: I64 = 0
+  while k < 50 {
+    if seen[k] != 1 { ok = false }
+    k = k + 1
+  }
+  t.check("every index appears exactly once", ok)
+}
+
+fn the_generator_never_gets_stuck_at_zero() {
+  # Zero is absorbing for xorshift, and a generator that reaches it returns zero
+  # forever while looking like it is working.
+  let r = rng.Rng { state: 0 }
+  let nonzero = false
+  let i: I64 = 0
+  while i < 5 {
+    if rng.next(r) != 0 { nonzero = true }
+    i = i + 1
+  }
+  t.check("the state recovered", nonzero)
+}
+
+fn unit_stays_inside_a_half_open_interval() {
+  let r = rng.new(17)
+  let ok = true
+  let i: I64 = 0
+  while i < 2000 {
+    let u = rng.unit(r)
+    if u < 0.0 || u >= 1.0 { ok = false }
+    i = i + 1
+  }
+  t.check("every draw is in [0, 1)", ok)
+}
+
+fn same(a: Arr[F64], b: Arr[F64]) -> Bool {
+  if len(a) != len(b) { return false }
+  let i: I64 = 0
+  while i < len(a) {
+    if a[i] != b[i] { return false }
+    i = i + 1
+  }
+  true
+}
+
+fn abs_f(v: F64) -> F64 = if v < 0.0 { 0.0 - v } else { v }
+
+the_same_seed_gives_the_same_augmentation()
+a_different_seed_gives_a_different_augmentation()
+a_seed_derived_per_sample_does_not_repeat_across_the_epoch_boundary()
+a_crop_has_the_size_it_was_asked_for()
+padding_outside_the_image_is_zero_and_not_a_repeated_edge()
+a_flip_reverses_each_row_and_leaves_the_label_alone()
+a_flip_with_probability_zero_never_flips()
+a_flip_twice_is_the_original()
+an_augmentation_does_not_modify_the_sample_it_was_given()
+cutout_zeroes_a_region_and_leaves_the_rest()
+a_window_is_contiguous()
+a_window_longer_than_the_sequence_returns_the_sequence()
+a_time_mask_zeroes_a_single_run()
+jitter_scales_with_the_series_and_not_absolutely()
+a_permutation_is_a_permutation()
+the_generator_never_gets_stuck_at_zero()
+unit_stays_inside_a_half_open_interval()
+t.report("augment")

@@ -1,0 +1,79 @@
+# sample.tw - what moves through a pipeline.
+#
+# A sample is a flat array of values plus the shape they should be read at. It
+# is written this way rather than as a tensor because `mode systems` does not
+# describe a tensor type: tensors are the numeric half of twill, and the systems
+# subset was designed around a compiler. So warp carries the buffer and the
+# shape, and hands both to the model at the boundary. When the subset gains a
+# tensor this file collapses to a field. See docs/needs.md.
+#
+# `id` is the sample's index in the underlying dataset and it survives every
+# stage. Shuffling, batching and augmentation all preserve it, which is what
+# makes it possible to answer "which examples did the model get wrong" after a
+# run rather than during it.
+
+mode systems
+
+struct Sample {
+  x: Arr[F64],
+  shape: Arr[I64],
+  y: F64,
+  id: I64,
+}
+
+struct Batch {
+  # Samples stacked along a leading axis, so `x` is n * stride values and the
+  # per-sample shape is unchanged. Stacked rather than kept as an array of
+  # samples because every consumer immediately wants one contiguous buffer, and
+  # doing it here means doing it once.
+  x: Arr[F64],
+  y: Arr[F64],
+  ids: Arr[I64],
+  n: I64,
+  shape: Arr[I64],
+}
+
+fn sample(x: Arr[F64], shape: Arr[I64], y: F64, id: I64) -> Sample =
+  Sample { x: x, shape: shape, y: y, id: id }
+
+fn stride_of(shape: Arr[I64]) -> I64 {
+  let n: I64 = 1
+  let i: I64 = 0
+  while i < len(shape) {
+    n = n * shape[i]
+    i = i + 1
+  }
+  n
+}
+
+fn stack(samples: Arr[Sample]) -> Batch {
+  let x: Arr[F64] = []
+  let y: Arr[F64] = []
+  let ids: Arr[I64] = []
+  let i: I64 = 0
+  while i < len(samples) {
+    let s = samples[i]
+    let j: I64 = 0
+    while j < len(s.x) {
+      x.push(s.x[j])
+      j = j + 1
+    }
+    y.push(s.y)
+    ids.push(s.id)
+    i = i + 1
+  }
+  let shape = if len(samples) > 0 { samples[0].shape } else { [] }
+  Batch { x: x, y: y, ids: ids, n: len(samples), shape: shape }
+}
+
+# The row of a stacked batch, for a consumer that wants one sample back out.
+fn row(b: Batch, i: I64) -> Sample {
+  let stride = stride_of(b.shape)
+  let x: Arr[F64] = []
+  let j: I64 = 0
+  while j < stride {
+    x.push(b.x[i * stride + j])
+    j = j + 1
+  }
+  Sample { x: x, shape: b.shape, y: b.y[i], id: b.ids[i] }
+}

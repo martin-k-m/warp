@@ -1,0 +1,171 @@
+mode systems
+
+import "harness.tw" as t
+import "../src/cache.tw" as cache
+import "../src/pipeline.tw" as pipe
+import "../src/sample.tw" as smp
+
+fn src(n: I64, version: I64) -> pipe.Source = pipe.Source {
+  name: "toy",
+  version: version,
+  count: n,
+  get: fn(i: I64) -> smp.Sample = smp.Sample { x: [f64(i)], shape: [1], y: f64(i), id: i },
+}
+
+fn nop(s: smp.Sample) -> smp.Sample = s
+
+fn base() -> pipe.Pipeline =
+  pipe.map(pipe.from_source(src(100, 1)), "standardise", 1, nop)
+
+fn c() -> cache.Cache = cache.open("/tmp/warp-cache")
+
+# ── What must change the key ────────────────────────────────────────────────
+
+fn a_stage_version_bump_changes_the_key() {
+  # The case the whole design is for: someone edits a transform, bumps its
+  # version, and must not be served the old data.
+  let a = base()
+  let b = pipe.map(pipe.from_source(src(100, 1)), "standardise", 2, nop)
+  t.check("a version bump misses the cache", cache.key(c(), a) != cache.key(c(), b))
+}
+
+fn renaming_a_stage_changes_the_key() {
+  let a = base()
+  let b = pipe.map(pipe.from_source(src(100, 1)), "normalise", 1, nop)
+  t.check("a rename misses the cache", cache.key(c(), a) != cache.key(c(), b))
+}
+
+fn adding_a_stage_changes_the_key() {
+  let a = base()
+  let b = pipe.filter(base(), "drop-blank", 1, fn(s: smp.Sample) -> Bool = true)
+  t.check("an added filter misses the cache", cache.key(c(), a) != cache.key(c(), b))
+}
+
+fn reordering_two_stages_changes_the_key() {
+  # crop then normalise is not normalise then crop, and a key built from an
+  # unordered set of names would call them the same pipeline.
+  let a = pipe.map(pipe.map(pipe.from_source(src(100, 1)), "crop", 1, nop), "normalise", 1, nop)
+  let b = pipe.map(pipe.map(pipe.from_source(src(100, 1)), "normalise", 1, nop), "crop", 1, nop)
+  t.check("swapping two stages misses the cache", cache.key(c(), a) != cache.key(c(), b))
+}
+
+fn a_changed_source_size_changes_the_key() {
+  let a = base()
+  let b = pipe.map(pipe.from_source(src(101, 1)), "standardise", 1, nop)
+  t.check("appending rows misses the cache", cache.key(c(), a) != cache.key(c(), b))
+}
+
+fn a_changed_source_version_changes_the_key() {
+  let a = base()
+  let b = pipe.map(pipe.from_source(src(100, 2)), "standardise", 1, nop)
+  t.check("a source version bump misses the cache", cache.key(c(), a) != cache.key(c(), b))
+}
+
+fn a_different_shuffle_seed_changes_the_key() {
+  # A cached artefact is a sequence, and its order is part of it.
+  let a = pipe.shuffle(base(), 64, 1)
+  let b = pipe.shuffle(base(), 64, 2)
+  t.check("a new shuffle seed misses the cache", cache.key(c(), a) != cache.key(c(), b))
+}
+
+# ── What must not change the key ────────────────────────────────────────────
+
+fn the_batch_size_does_not_change_the_key() {
+  # Changing the batch size must not throw away an hour of decoding: it changes
+  # how samples are grouped, never what any of them contains.
+  let a = pipe.batch(base(), 32, false)
+  let b = pipe.batch(base(), 64, false)
+  t.equal_str("two batch sizes share one key", cache.key(c(), a), cache.key(c(), b))
+}
+
+fn prefetch_depth_does_not_change_the_key() {
+  let a = pipe.prefetch(base(), 1)
+  let b = pipe.prefetch(base(), 8)
+  t.equal_str("two prefetch depths share one key", cache.key(c(), a), cache.key(c(), b))
+}
+
+fn the_repeat_count_does_not_change_the_key() {
+  let a = pipe.repeat(base(), 1)
+  let b = pipe.repeat(base(), 90)
+  t.equal_str("two epoch counts share one key", cache.key(c(), a), cache.key(c(), b))
+}
+
+fn an_identical_pipeline_built_twice_gives_one_key() {
+  t.equal_str("the key is a function of the description alone",
+    cache.key(c(), base()), cache.key(c(), base()))
+}
+
+# ── The explanation ─────────────────────────────────────────────────────────
+
+fn the_key_can_be_explained() {
+  # A user asking why their cache missed gets a diff, not a hex string.
+  let text = cache.explain(c(), base())
+  t.check("the source is named", contains(text, "toy"))
+  t.check("the stage is named", contains(text, "standardise"))
+  t.check("the format version is recorded", contains(text, "warp-cache v"))
+}
+
+fn the_cache_format_version_is_part_of_the_key() {
+  # A change to how warp writes an entry must miss rather than misread.
+  t.check("the format version is in the hashed text", contains(cache.explain(c(), base()), "v" + str(cache.FORMAT_VERSION)))
+}
+
+# ── Round trip ──────────────────────────────────────────────────────────────
+
+fn a_batch_survives_encoding_and_decoding() {
+  let b = smp.Batch { x: [1.0, 2.0, 3.0, 4.0], y: [0.0, 1.0], ids: [7, 9], n: 2, shape: [2] }
+  match cache.decode(cache.encode([b])) {
+    Opt.None => t.check("the round trip decoded", false),
+    Opt.Some(out) => {
+      t.equal_i64("one batch came back", len(out), 1)
+      t.equal_i64("the count survived", out[0].n, 2)
+      t.equal_i64("the ids survived", out[0].ids[1], 9)
+      t.near("the values survived", out[0].x[3], 4.0, 1.0e-12)
+    },
+  }
+}
+
+fn a_truncated_entry_decodes_to_nothing_rather_than_half_a_dataset() {
+  let full = cache.encode([smp.Batch { x: [1.0, 2.0], y: [0.0], ids: [1], n: 1, shape: [2] }])
+  let cut = slice(full, 0, len(full) / 2)
+  match cache.decode(cut) {
+    Opt.None => t.check("a truncated entry is a miss", true),
+    Opt.Some(_) => t.check("a truncated entry must not decode", false),
+  }
+}
+
+fn an_entry_from_a_future_format_is_a_miss_and_not_an_error() {
+  let body = "warp 99 1\nbatch 1 1\n2\n1.0 2.0\n0.0\n1\n"
+  match cache.decode(body) {
+    Opt.None => t.check("an unknown format version misses", true),
+    Opt.Some(_) => t.check("an unknown format version must not be read", false),
+  }
+}
+
+fn contains(hay: Str, needle: Str) -> Bool {
+  let n = len(needle)
+  let i: I64 = 0
+  while i + n <= len(hay) {
+    if slice(hay, i, i + n) == needle { return true }
+    i = i + 1
+  }
+  false
+}
+
+a_stage_version_bump_changes_the_key()
+renaming_a_stage_changes_the_key()
+adding_a_stage_changes_the_key()
+reordering_two_stages_changes_the_key()
+a_changed_source_size_changes_the_key()
+a_changed_source_version_changes_the_key()
+a_different_shuffle_seed_changes_the_key()
+the_batch_size_does_not_change_the_key()
+prefetch_depth_does_not_change_the_key()
+the_repeat_count_does_not_change_the_key()
+an_identical_pipeline_built_twice_gives_one_key()
+the_key_can_be_explained()
+the_cache_format_version_is_part_of_the_key()
+a_batch_survives_encoding_and_decoding()
+a_truncated_entry_decodes_to_nothing_rather_than_half_a_dataset()
+an_entry_from_a_future_format_is_a_miss_and_not_an_error()
+t.report("cache")

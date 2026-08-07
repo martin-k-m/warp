@@ -1,0 +1,6 @@
+# spool vendors dependencies here.
+twill_modules/
+# Downloaded datasets. warp bundles no data and this is the line that keeps it
+# true when someone runs the example.
+data/
+.warp-cache/

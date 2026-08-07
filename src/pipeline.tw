@@ -1,0 +1,402 @@
+# pipeline.tw - map, filter, batch, shuffle, prefetch, repeat.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# THE ORDER OPERATIONS COMPOSE IN, AND WHY IT MATTERS
+#
+# Stages apply in the order they were added. `p.map(f).shuffle(1000).batch(32)`
+# maps first, then shuffles, then batches. That is the only rule, and it is
+# stated first because the two orders people mix up produce different training
+# runs and neither one crashes.
+#
+#   shuffle then batch:  samples are drawn from a buffer of 1000, then grouped
+#                        into 32s. Each batch is a fresh mix of the dataset, and
+#                        the composition of every batch changes each epoch.
+#
+#   batch then shuffle:  samples are grouped into 32s in file order, then the
+#                        batches are reordered. The same 32 samples travel
+#                        together for the entire run. The order of batches
+#                        changes; their contents never do.
+#
+# The second is almost never what anyone means, and it is what you get if the
+# calls are typed in the wrong order. If the data is sorted by class, which is
+# the usual layout on disk, batch-then-shuffle gives batches that are each a
+# single class. Batch normalisation then computes its statistics over one class
+# at a time, the gradient is systematically wrong, and the run does not fail. It
+# converges to something worse, slowly, and the loss curve looks plausible.
+#
+# So: shuffle before batch, always, unless you can say out loud why not. warp
+# does not silently reorder the stages to enforce this. Reordering a pipeline
+# behind the user's back means the code says one thing and does another, and the
+# next person cannot read what happens from what is written. Instead
+# `validate` reports the suspicious order as a warning naming both stages, and
+# the caller decides.
+#
+# Two more orderings worth stating:
+#
+#   map before filter is usually right when the filter reads a field the map
+#   computes, and wrong otherwise, because a map runs on samples that are about
+#   to be discarded. On an expensive decode that is the whole cost of the stage.
+#
+#   repeat before shuffle gives one shuffled stream across all epochs, so a
+#   sample can appear twice in quick succession across the epoch boundary.
+#   Shuffle before repeat gives a fresh permutation per epoch, which is what
+#   "epoch" usually means to the person reading the loss curve.
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# The pipeline is pull based. A consumer asks for the next batch and the demand
+# travels back up the stages to the source. Push would mean each stage decides
+# when to hand work on, and then a slow consumer is absorbed by unbounded
+# buffering somewhere in the middle, which is how a data pipeline turns into an
+# out-of-memory error two hours into a run.
+
+mode systems
+
+import "sample.tw" as smp
+import "rng.tw" as rng
+
+let MAP: I64 = 0
+let FILTER: I64 = 1
+let BATCH: I64 = 2
+let SHUFFLE: I64 = 3
+let PREFETCH: I64 = 4
+let REPEAT: I64 = 5
+
+# A stage carries a name as well as a function. The name is not documentation:
+# it is the stage's identity in the cache key, because a function value has no
+# stable identity a program can hash. `cache.tw` depends on this, and a stage
+# whose behaviour changes must change its name or its version. That obligation
+# is on the caller and it is the price of a cache that does not serve stale data.
+struct Stage {
+  kind: I64,
+  name: Str,
+  version: I64,
+  n: I64,           # batch size, buffer size, prefetch depth, repeat count
+  drop_last: Bool,
+  seed: I64,
+  fn_map: Fn(smp.Sample) -> smp.Sample,
+  fn_keep: Fn(smp.Sample) -> Bool,
+}
+
+struct Pipeline {
+  # The source is addressed by index rather than being an iterator, because
+  # shuffling and caching both need to fetch a specific sample rather than the
+  # next one. A stream that cannot do that is handled by `stream.tw` instead.
+  source: Source,
+  stages: Arr[Stage],
+}
+
+struct Source {
+  name: Str,
+  version: I64,
+  count: I64,
+  get: Fn(I64) -> smp.Sample,
+}
+
+fn from_source(s: Source) -> Pipeline = Pipeline { source: s, stages: [] }
+
+fn blank_stage(kind: I64, name: Str) -> Stage = Stage {
+  kind: kind, name: name, version: 1, n: 0, drop_last: false, seed: 0,
+  fn_map: identity, fn_keep: keep_all,
+}
+
+fn identity(s: smp.Sample) -> smp.Sample = s
+fn keep_all(s: smp.Sample) -> Bool = true
+
+fn map(p: Pipeline, name: Str, version: I64, f: Fn(smp.Sample) -> smp.Sample) -> Pipeline {
+  let st = blank_stage(MAP, name)
+  st.version = version
+  st.fn_map = f
+  p.stages.push(st)
+  p
+}
+
+fn filter(p: Pipeline, name: Str, version: I64, f: Fn(smp.Sample) -> Bool) -> Pipeline {
+  let st = blank_stage(FILTER, name)
+  st.version = version
+  st.fn_keep = f
+  p.stages.push(st)
+  p
+}
+
+# `drop_last` defaults to false and the default is the safe one. Dropping the
+# tail silently discards up to batch_size - 1 examples per epoch, which on a
+# small validation set is a measurable and invisible change to the metric.
+fn batch(p: Pipeline, n: I64, drop_last: Bool) -> Pipeline {
+  let st = blank_stage(BATCH, "batch")
+  st.n = n
+  st.drop_last = drop_last
+  p.stages.push(st)
+  p
+}
+
+# A bounded reservoir. `buffer` samples are held; each draw picks one at random
+# from the buffer and refills its slot from upstream. The buffer size is the
+# knob that matters and it is required rather than defaulted, because the right
+# value depends on how the data is ordered on disk and warp cannot know that.
+#
+# A buffer smaller than the run of one class in a sorted dataset does not
+# shuffle it: every draw comes from a window that contains one label. This is
+# the single most common silent failure in a data pipeline, and it is why the
+# buffer is an argument and not a default.
+fn shuffle(p: Pipeline, buffer: I64, seed: I64) -> Pipeline {
+  let st = blank_stage(SHUFFLE, "shuffle")
+  st.n = buffer
+  st.seed = seed
+  p.stages.push(st)
+  p
+}
+
+# Depth in batches, not samples. Prefetch exists to overlap loading with the
+# step that consumes it, so one batch ahead already hides the whole of the
+# latency; deeper only helps when load times vary a lot, and each extra level
+# costs a batch of memory.
+fn prefetch(p: Pipeline, depth: I64) -> Pipeline {
+  let st = blank_stage(PREFETCH, "prefetch")
+  st.n = depth
+  p.stages.push(st)
+  p
+}
+
+# `count` of 0 means forever. An infinite pipeline is a normal thing to want,
+# and expressing it as a count of zero rather than a separate stage keeps the
+# stage list uniform, which matters because the cache key walks it.
+fn repeat(p: Pipeline, count: I64) -> Pipeline {
+  let st = blank_stage(REPEAT, "repeat")
+  st.n = count
+  p.stages.push(st)
+  p
+}
+
+# ── The order check ─────────────────────────────────────────────────────────
+
+# Returns a warning per suspicious ordering, or an empty array. A warning and
+# not an error: there are real reasons to batch before shuffling, above all a
+# dataset already stored in shuffled batches, and a library that refuses is a
+# library people work around by not using it.
+fn validate(p: Pipeline) -> Arr[Str] {
+  let out: Arr[Str] = []
+  let batch_at = index_of_kind(p, BATCH)
+  let shuffle_at = index_of_kind(p, SHUFFLE)
+  let repeat_at = index_of_kind(p, REPEAT)
+  let prefetch_at = index_of_kind(p, PREFETCH)
+  if batch_at >= 0 && shuffle_at > batch_at {
+    out.push("shuffle after batch: the same samples will travel together for the whole run. Shuffle before batch unless that is deliberate.")
+  }
+  if repeat_at >= 0 && shuffle_at > repeat_at {
+    out.push("shuffle after repeat: one permutation is drawn across all epochs, so a sample can recur across the epoch boundary.")
+  }
+  if prefetch_at >= 0 && prefetch_at < len(p.stages) - 1 {
+    out.push("prefetch is not the last stage: it will buffer partly-processed samples and the work it was meant to overlap still happens on the consumer's thread.")
+  }
+  out
+}
+
+fn index_of_kind(p: Pipeline, kind: I64) -> I64 {
+  let i: I64 = 0
+  while i < len(p.stages) {
+    if p.stages[i].kind == kind { return i }
+    i = i + 1
+  }
+  0 - 1
+}
+
+# ── Execution ───────────────────────────────────────────────────────────────
+
+struct Iter {
+  p: Pipeline,
+  cursor: I64,        # next source index to read
+  epoch: I64,
+  # The shuffle reservoir, holding source indices rather than samples. Indices
+  # because a buffer of 10,000 decoded images is a gigabyte and a buffer of
+  # 10,000 indices is 80 kilobytes; the sample is fetched when it is drawn.
+  buffer: Arr[I64],
+  rng: rng.Rng,
+  order: Arr[I64],
+  done: Bool,
+}
+
+fn iterate(p: Pipeline) -> Iter = Iter {
+  p: p,
+  cursor: 0,
+  epoch: 0,
+  buffer: [],
+  rng: rng.new(seed_of(p)),
+  order: [],
+  done: false,
+}
+
+fn seed_of(p: Pipeline) -> I64 {
+  let i: I64 = 0
+  while i < len(p.stages) {
+    if p.stages[i].kind == SHUFFLE { return p.stages[i].seed }
+    i = i + 1
+  }
+  0
+}
+
+# One batch, or none when the pipeline is exhausted. The stages are applied in
+# their declared order to each sample as it is pulled, so a `map` after a
+# `batch` is applied to the samples of that batch and not to the batch itself,
+# which is the only reading that keeps a stage's type the same wherever it sits.
+fn next_batch(it: Iter) -> Opt[smp.Batch] {
+  let size = batch_size(it.p)
+  let taken: Arr[smp.Sample] = []
+  while len(taken) < size {
+    match next_sample(it) {
+      Opt.Some(s) => taken.push(s),
+      Opt.None => {
+        if len(taken) == 0 { return Opt.None }
+        if drop_last(it.p) { return Opt.None }
+        return Opt.Some(smp.stack(taken))
+      },
+    }
+  }
+  Opt.Some(smp.stack(taken))
+}
+
+fn next_sample(it: Iter) -> Opt[smp.Sample] {
+  while true {
+    match raw_next(it) {
+      Opt.None => return Opt.None,
+      Opt.Some(s) => {
+        match apply_stages(it.p, s) {
+          Opt.Some(t) => return Opt.Some(t),
+          # A filtered sample is not a stopping condition. The loop continues
+          # rather than returning None, or a filter that rejects the first
+          # sample would end the epoch.
+          Opt.None => {},
+        }
+      },
+    }
+  }
+  Opt.None
+}
+
+fn apply_stages(p: Pipeline, s: smp.Sample) -> Opt[smp.Sample] {
+  let cur = s
+  let i: I64 = 0
+  while i < len(p.stages) {
+    let st = p.stages[i]
+    if st.kind == MAP {
+      cur = st.fn_map(cur)
+    } else if st.kind == FILTER {
+      if !st.fn_keep(cur) { return Opt.None }
+    }
+    i = i + 1
+  }
+  Opt.Some(cur)
+}
+
+# The source read, with the reservoir and the epoch counter. This is where
+# shuffle and repeat actually happen, because both are about which sample comes
+# next rather than about transforming one.
+fn raw_next(it: Iter) -> Opt[smp.Sample] {
+  let buf = shuffle_buffer(it.p)
+  if buf <= 0 {
+    match next_index(it) {
+      Opt.Some(i) => return Opt.Some(it.p.source.get(i)),
+      Opt.None => return Opt.None,
+    }
+  }
+  # Fill the reservoir before the first draw, so the first sample is already
+  # drawn from a full buffer. Drawing while it fills biases the start of every
+  # epoch toward the beginning of the file.
+  while len(it.buffer) < buf {
+    match next_index(it) {
+      Opt.Some(i) => it.buffer.push(i),
+      Opt.None => {
+        if len(it.buffer) == 0 { return Opt.None }
+        # Upstream is exhausted: drain what is held, still at random, so the
+        # tail of the last epoch is shuffled like everything else.
+        let k = rng.below(it.rng, len(it.buffer))
+        let idx = it.buffer[k]
+        it.buffer[k] = it.buffer[len(it.buffer) - 1]
+        it.buffer.pop()
+        return Opt.Some(it.p.source.get(idx))
+      },
+    }
+  }
+  let k = rng.below(it.rng, len(it.buffer))
+  let idx = it.buffer[k]
+  match next_index(it) {
+    Opt.Some(nxt) => it.buffer[k] = nxt,
+    Opt.None => {
+      it.buffer[k] = it.buffer[len(it.buffer) - 1]
+      it.buffer.pop()
+    },
+  }
+  Opt.Some(it.p.source.get(idx))
+}
+
+fn next_index(it: Iter) -> Opt[I64] {
+  if it.cursor >= it.p.source.count {
+    let reps = repeat_count(it.p)
+    let unlimited = reps == 0 && has_kind(it.p, REPEAT)
+    if !unlimited && it.epoch + 1 >= max_epochs(it.p) { return Opt.None }
+    it.epoch = it.epoch + 1
+    it.cursor = 0
+  }
+  let i = it.cursor
+  it.cursor = it.cursor + 1
+  Opt.Some(i)
+}
+
+fn max_epochs(p: Pipeline) -> I64 {
+  let r = repeat_count(p)
+  if !has_kind(p, REPEAT) { return 1 }
+  if r == 0 { return 0 }
+  r
+}
+
+fn repeat_count(p: Pipeline) -> I64 {
+  let i = index_of_kind(p, REPEAT)
+  if i < 0 { 1 } else { p.stages[i].n }
+}
+
+fn has_kind(p: Pipeline, kind: I64) -> Bool = index_of_kind(p, kind) >= 0
+
+fn batch_size(p: Pipeline) -> I64 {
+  let i = index_of_kind(p, BATCH)
+  if i < 0 { 1 } else { p.stages[i].n }
+}
+
+fn drop_last(p: Pipeline) -> Bool {
+  let i = index_of_kind(p, BATCH)
+  if i < 0 { false } else { p.stages[i].drop_last }
+}
+
+fn shuffle_buffer(p: Pipeline) -> I64 {
+  let i = index_of_kind(p, SHUFFLE)
+  if i < 0 { 0 } else { p.stages[i].n }
+}
+
+# ── Identity ────────────────────────────────────────────────────────────────
+
+# The canonical description of what this pipeline computes: the source, and
+# every stage that changes the samples or their order. This string is what
+# `cache.tw` hashes, and the argument for exactly what it contains is there.
+fn describe(p: Pipeline) -> Str {
+  let out = "source " + p.source.name + " v" + str(p.source.version) + " n" + str(p.source.count) + "\n"
+  let i: I64 = 0
+  while i < len(p.stages) {
+    let st = p.stages[i]
+    out = out + describe_stage(st) + "\n"
+    i = i + 1
+  }
+  out
+}
+
+fn describe_stage(st: Stage) -> Str {
+  if st.kind == MAP { return "map " + st.name + " v" + str(st.version) }
+  if st.kind == FILTER { return "filter " + st.name + " v" + str(st.version) }
+  if st.kind == BATCH { return "batch " + str(st.n) + " drop_last=" + str_bool(st.drop_last) }
+  if st.kind == SHUFFLE { return "shuffle " + str(st.n) + " seed=" + str(st.seed) }
+  # Prefetch and repeat are named but carry no parameter into the description.
+  # Prefetch cannot change a sample's value, and repeat only changes how many
+  # times the same values are produced. Including either would make a cache
+  # entry miss when the user changed a knob that cannot affect the bytes.
+  if st.kind == PREFETCH { return "prefetch" }
+  "repeat"
+}
+
+fn str_bool(b: Bool) -> Str = if b { "true" } else { "false" }
