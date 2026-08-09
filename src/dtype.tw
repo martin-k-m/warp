@@ -1,0 +1,55 @@
+mode systems
+
+# dtype.tw - the element dtype a pipeline declares for its batches.
+#
+# warp carries flat Arr[F64] buffers and does not build tensors: the consumer
+# does, at the boundary. So a dtype here is a declared intent, not a storage
+# change, and its whole job is to travel with a batch so the consumer builds the
+# tensor at the width the data was meant for rather than defaulting to f64 and
+# narrowing afterwards. That narrowing is the f64 detour the dtype exists to
+# remove: bandwidth is the bottleneck in a data pipeline far more often than
+# compute, and moving f64 through the pipeline and the cache to hand the model
+# something it immediately narrows is moving twice the bytes for no gain.
+#
+# The seven codes are the language's, value for value (docs/dtypes.md in raster).
+# They are duplicated here rather than imported because warp is a systems-mode
+# library and the dtype set lives in the numeric half; when the systems subset
+# gains a tensor, this file and sample.tw's Batch.dtype collapse into it. The
+# same trade shuttle and raster's own buf.tw make, for the same import reason.
+#
+# Nothing narrows a buffer yet: until raster NEEDS-111's packed buffer lands
+# there is no Arr narrower than F64 to hold, so the dtype is metadata the cache
+# records and the consumer reads. When it lands, warp stores batches and cache
+# entries at the declared width and the bytes actually drop, with no code that
+# reads the dtype changing.
+
+let DT_BOOL: I64 = 0
+let DT_I8: I64 = 1
+let DT_I32: I64 = 2
+let DT_F16: I64 = 3
+let DT_BF16: I64 = 4
+let DT_F32: I64 = 5
+let DT_F64: I64 = 6
+
+fn dtype_name(dt: I64) -> Str {
+  if dt == DT_BOOL { return "bool" }
+  if dt == DT_I8 { return "i8" }
+  if dt == DT_I32 { return "i32" }
+  if dt == DT_F16 { return "f16" }
+  if dt == DT_BF16 { return "bf16" }
+  if dt == DT_F32 { return "f32" }
+  "f64"
+}
+
+# Bytes per element once a packed buffer exists: raster's dtype_bits over eight.
+# This is what a dtype-aware cache size will multiply by; today every element is
+# eight bytes whatever this returns, which is the gap NEEDS-111 closes.
+fn elem_bytes(dt: I64) -> I64 {
+  if dt == DT_BOOL { return 1 }
+  if dt == DT_I8 { return 1 }
+  if dt == DT_I32 { return 4 }
+  if dt == DT_F16 { return 2 }
+  if dt == DT_BF16 { return 2 }
+  if dt == DT_F32 { return 4 }
+  8
+}

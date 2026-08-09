@@ -4,6 +4,7 @@ import "harness.tw" as t
 import "../src/cache.tw" as cache
 import "../src/pipeline.tw" as pipe
 import "../src/sample.tw" as smp
+import "../src/dtype.tw" as dtype
 
 fn src(n: I64, version: I64) -> pipe.Source = pipe.Source {
   name: "toy",
@@ -53,6 +54,14 @@ fn a_changed_source_size_changes_the_key() {
   let a = base()
   let b = pipe.map(pipe.from_source(src(101, 1)), "standardise", 1, nop)
   t.check("appending rows misses the cache", cache.key(c(), a) != cache.key(c(), b))
+}
+
+fn a_changed_declared_dtype_changes_the_key() {
+  # The same transforms asked for at f32 and at bf16 are different data, so a
+  # cache built for one must not be served for the other.
+  let a = pipe.astype(base(), dtype.DT_F32)
+  let b = pipe.astype(base(), dtype.DT_BF16)
+  t.check("a dtype change misses the cache", cache.key(c(), a) != cache.key(c(), b))
 }
 
 fn a_changed_source_version_changes_the_key() {
@@ -113,7 +122,8 @@ fn the_cache_format_version_is_part_of_the_key() {
 # ── Round trip ──────────────────────────────────────────────────────────────
 
 fn a_batch_survives_encoding_and_decoding() {
-  let b = smp.Batch { x: [1.0, 2.0, 3.0, 4.0], y: [0.0, 1.0], ids: [7, 9], n: 2, shape: [2] }
+  let b = smp.Batch { x: [1.0, 2.0, 3.0, 4.0], y: [0.0, 1.0], ids: [7, 9], n: 2,
+    shape: [2], dtype: dtype.DT_BF16 }
   match cache.decode(cache.encode([b])) {
     Opt.None => t.check("the round trip decoded", false),
     Opt.Some(out) => {
@@ -121,12 +131,14 @@ fn a_batch_survives_encoding_and_decoding() {
       t.equal_i64("the count survived", out[0].n, 2)
       t.equal_i64("the ids survived", out[0].ids[1], 9)
       t.near("the values survived", out[0].x[3], 4.0, 1.0e-12)
+      t.equal_i64("the declared dtype survived", out[0].dtype, dtype.DT_BF16)
     },
   }
 }
 
 fn a_truncated_entry_decodes_to_nothing_rather_than_half_a_dataset() {
-  let full = cache.encode([smp.Batch { x: [1.0, 2.0], y: [0.0], ids: [1], n: 1, shape: [2] }])
+  let full = cache.encode([smp.Batch { x: [1.0, 2.0], y: [0.0], ids: [1], n: 1,
+    shape: [2], dtype: dtype.DT_F64 }])
   let cut = slice(full, 0, len(full) / 2)
   match cache.decode(cut) {
     Opt.None => t.check("a truncated entry is a miss", true),
@@ -157,6 +169,7 @@ renaming_a_stage_changes_the_key()
 adding_a_stage_changes_the_key()
 reordering_two_stages_changes_the_key()
 a_changed_source_size_changes_the_key()
+a_changed_declared_dtype_changes_the_key()
 a_changed_source_version_changes_the_key()
 a_different_shuffle_seed_changes_the_key()
 the_batch_size_does_not_change_the_key()

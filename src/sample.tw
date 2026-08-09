@@ -31,6 +31,12 @@ struct Batch {
   ids: Arr[I64],
   n: I64,
   shape: Arr[I64],
+  # The dtype the consumer should build this batch's tensor at, one of dtype.tw's
+  # codes. A declaration, not a storage change: the buffer is still Arr[F64],
+  # because the systems subset has no narrower array yet. It travels so the model
+  # builds the tensor at the intended width in one step instead of at f64 and a
+  # narrowing after. See dtype.tw for why that detour is the thing to avoid.
+  dtype: I64,
 }
 
 fn sample(x: Arr[F64], shape: Arr[I64], y: F64, id: I64) -> Sample =
@@ -46,7 +52,7 @@ fn stride_of(shape: Arr[I64]) -> I64 {
   n
 }
 
-fn stack(samples: Arr[Sample]) -> Batch {
+fn stack(samples: Arr[Sample], dtype: I64) -> Batch {
   let x: Arr[F64] = []
   let y: Arr[F64] = []
   let ids: Arr[I64] = []
@@ -63,7 +69,7 @@ fn stack(samples: Arr[Sample]) -> Batch {
     i = i + 1
   }
   let shape = if len(samples) > 0 { samples[0].shape } else { [] }
-  Batch { x: x, y: y, ids: ids, n: len(samples), shape: shape }
+  Batch { x: x, y: y, ids: ids, n: len(samples), shape: shape, dtype: dtype }
 }
 
 # The row of a stacked batch, for a consumer that wants one sample back out.

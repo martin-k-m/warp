@@ -66,7 +66,7 @@ import "strutil.tw" as sx
 import "pipeline.tw" as pipe
 import "sample.tw" as smp
 
-let FORMAT_VERSION: I64 = 1
+let FORMAT_VERSION: I64 = 2
 
 struct Cache {
   dir: Str,
@@ -87,6 +87,9 @@ fn explain(c: Cache, p: pipe.Pipeline) -> Str {
   let out = "warp-cache v" + str(c.format) + "\n"
   out = out + "source " + p.source.name + " v" + str(p.source.version) +
     " n" + str(p.source.count) + "\n"
+  # The declared dtype is part of the identity: a pipeline asked for at f32 and
+  # one asked for at bf16 are different data, so they must not share an entry.
+  out = out + "dtype " + str(p.dtype) + "\n"
   let i: I64 = 0
   while i < len(p.stages) {
     let st = p.stages[i]
@@ -184,7 +187,7 @@ fn encode(batches: Arr[smp.Batch]) -> Str {
   let i: I64 = 0
   while i < len(batches) {
     let b = batches[i]
-    out = out + "batch " + str(b.n) + " " + str(len(b.shape)) + "\n"
+    out = out + "batch " + str(b.n) + " " + str(len(b.shape)) + " " + str(b.dtype) + "\n"
     out = out + join_i64(b.shape) + "\n"
     out = out + join_f64(b.x) + "\n"
     out = out + join_f64(b.y) + "\n"
@@ -215,7 +218,10 @@ fn decode(body: Str) -> Opt[Arr[smp.Batch]] {
     let x = parse_f64s(lines[cursor + 2])
     let y = parse_f64s(lines[cursor + 3])
     let ids = parse_i64s(lines[cursor + 4])
-    out.push(smp.Batch { x: x, y: y, ids: ids, n: sx.parse_i64(meta[1]), shape: shape })
+    # meta is "batch n rank dtype"; a v2 entry always carries the dtype, and a
+    # v1 entry never reaches here because the version line already missed.
+    out.push(smp.Batch { x: x, y: y, ids: ids, n: sx.parse_i64(meta[1]),
+      shape: shape, dtype: sx.parse_i64(meta[3]) })
     cursor = cursor + 5
     i = i + 1
   }

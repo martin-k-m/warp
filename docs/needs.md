@@ -174,6 +174,18 @@ This is the largest design question on the list and it is a language-level one:
 `mode systems` was defined by what a compiler needs, and a data loader is the
 first program that wants both halves at once.
 
+Since this entry was written, the numeric half grew narrow dtypes (raster
+`docs/dtypes.md`): seven of them, a `.to(dt)` cast, and a packed byte buffer
+designed under raster NEEDS-111. warp now carries a declared dtype on the
+pipeline and the batch (`src/dtype.tw`, `pipe.astype`), so a consumer building
+the tensor at the boundary builds it at the width the data was meant for, f32
+for scaled pixels, i32 for labels, rather than at f64 and narrowing after, which
+moves twice the bytes through the pipeline and the cache for nothing. That is a
+declaration today, not a storage change, for the same reason this entry is open:
+without a tensor across the seam, and without NEEDS-111's buffer landed in the
+runtime, warp still holds `Arr[F64]`. When both land, the dtype already threads
+to the point a narrow store hangs off, and the cache already keys on it.
+
 ### 12. Generic containers over user types
 
 **Needs:** `Arr[T]` where `T` is a user struct, which the design implies but does

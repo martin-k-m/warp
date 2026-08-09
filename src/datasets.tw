@@ -202,6 +202,13 @@ fn be32(s: Str, at: I64) -> I64 = s[at] * 16777216 + s[at + 1] * 65536 + s[at + 
 # [0, 1] here and standardised later by a pipeline stage, so the scaling is part
 # of the format and the standardisation is part of the experiment, which is the
 # line the cache key is drawn along.
+#
+# Dtype: scaled pixels are meant for f32, not f64, so declare it on the pipeline
+# with `pipe.astype(p, dt.DT_F32)` and the model builds them narrow in one step.
+# The labels here are class indices and belong in i32 whatever the features are;
+# Batch.dtype governs the feature buffer, and the consumer builds the label
+# tensor at i32 from the same batch. A pipeline that wanted the raw bytes rather
+# than the [0, 1] scaling would drop the `/ 255.0` and declare DT_I8.
 fn idx_source(name: Str, images: Idx, labels: Idx, shape: Arr[I64]) -> pipe.Source {
   let stride = smp.stride_of(shape)
   pipe.Source {

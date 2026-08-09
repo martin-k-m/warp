@@ -53,6 +53,7 @@ mode systems
 
 import "sample.tw" as smp
 import "rng.tw" as rng
+import "dtype.tw" as dt
 
 let MAP: I64 = 0
 let FILTER: I64 = 1
@@ -83,6 +84,11 @@ struct Pipeline {
   # next one. A stream that cannot do that is handled by `stream.tw` instead.
   source: Source,
   stages: Arr[Stage],
+  # The dtype every batch this pipeline produces declares. f64 unless `astype`
+  # set it. It is carried on the pipeline rather than in a stage because it does
+  # not transform a sample: it is a fact about the batches, and batching and
+  # shuffling preserve it for free because it never touches the sample buffers.
+  dtype: I64,
 }
 
 struct Source {
@@ -92,7 +98,19 @@ struct Source {
   get: Fn(I64) -> smp.Sample,
 }
 
-fn from_source(s: Source) -> Pipeline = Pipeline { source: s, stages: [] }
+fn from_source(s: Source) -> Pipeline = Pipeline { source: s, stages: [], dtype: dt.DT_F64 }
+
+# Declare the dtype the model should build these batches at. `p.astype(dt.DT_F32)`
+# on an image pipeline says the pixels are meant for f32, so the consumer stops
+# carrying them at f64 and narrowing after. It is not a stage and does not round
+# anything here: warp holds Arr[F64] and the systems subset has no narrower array
+# yet, so the declaration travels on the batch and the consumer acts on it. When
+# raster NEEDS-111's packed buffer lands, this is where a real narrow store hangs
+# off. It is part of the cache key, so changing it misses rather than misreads.
+fn astype(p: Pipeline, dtype: I64) -> Pipeline {
+  p.dtype = dtype
+  p
+}
 
 fn blank_stage(kind: I64, name: Str) -> Stage = Stage {
   kind: kind, name: name, version: 1, n: 0, drop_last: false, seed: 0,
@@ -247,11 +265,11 @@ fn next_batch(it: Iter) -> Opt[smp.Batch] {
       Opt.None => {
         if len(taken) == 0 { return Opt.None }
         if drop_last(it.p) { return Opt.None }
-        return Opt.Some(smp.stack(taken))
+        return Opt.Some(smp.stack(taken, it.p.dtype))
       },
     }
   }
-  Opt.Some(smp.stack(taken))
+  Opt.Some(smp.stack(taken, it.p.dtype))
 }
 
 fn next_sample(it: Iter) -> Opt[smp.Sample] {

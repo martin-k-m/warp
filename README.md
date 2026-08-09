@@ -41,6 +41,7 @@ written to have.
 | Piece | State |
 | --- | --- |
 | Composable pipeline: map, filter, batch, shuffle, prefetch, repeat | written, unrun |
+| A declared dtype carried to the batch, so the model builds it narrow not at f64 | written; bytes gated on raster NEEDS-111 |
 | The order check that catches shuffle-after-batch | written, unrun |
 | Disk cache keyed on the transformation chain | written, blocked on file IO |
 | Augmentation for images and sequences, each seeded explicitly | written, unrun |
@@ -62,6 +63,7 @@ import "twill_modules/warp/src/pipeline.tw" as pipe
 import "twill_modules/warp/src/augment.tw" as aug
 import "twill_modules/warp/src/rng.tw" as rng
 import "twill_modules/warp/src/cache.tw" as cache
+import "twill_modules/warp/src/dtype.tw" as dt
 
 let RUN_SEED: I64 = 20260807
 
@@ -74,6 +76,13 @@ fn build(src: pipe.Source, epoch: I64) -> pipe.Pipeline {
   p = pipe.map(p, "standardise", 1, fn(s: smp.Sample) -> smp.Sample = standardise(s))
   p = pipe.map(p, "crop-32-pad-4", 1,
     fn(s: smp.Sample) -> smp.Sample = aug.random_crop(s, 32, 32, 4, rng.seed_for(RUN_SEED, epoch, s.id)))
+
+  # Scaled pixels are meant for f32, so declare it: the batch carries the dtype
+  # and the model builds its tensor narrow in one step rather than at f64 and a
+  # cast after, which moves twice the bytes for nothing. A declaration today, a
+  # real narrow store once raster NEEDS-111 lands; either way the cache keys on
+  # it, so f32 and bf16 runs never share an entry.
+  p = pipe.astype(p, dt.DT_F32)
 
   # Shuffle, then batch. The other order gives every batch the same 32 samples
   # for the whole run. See the top of src/pipeline.tw.
