@@ -82,7 +82,7 @@ fn mix(x: I64) -> I64 {
   mask(h xor (h shr 16))
 }
 
-fn mask(x: I64) -> I64 = x and MASK32
+fn mask(x: I64) -> I64 = x band MASK32
 
 # A Fisher-Yates permutation of 0..n-1, drawn from `r`.
 #

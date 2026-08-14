@@ -8,5 +8,5 @@ entry = "src/pipeline.tw"
 # that must agree byte for byte across the toolchain, and the cost of depending
 # on spool is one vendored directory.
 [dependencies]
-twill = { version = "^1.2.0", git = "https://github.com/martin-k-m/twill" }
+twill = { version = "^1.5.0", git = "https://github.com/martin-k-m/twill" }
 spool = { version = "^0.1.0", git = "https://github.com/martin-k-m/spool" }

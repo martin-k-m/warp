@@ -26,7 +26,7 @@
 
 mode systems
 
-import "../twill_modules/spool/src/sha256.tw" as sha
+import "std/hash" as sha
 import "strutil.tw" as sx
 import "sample.tw" as smp
 import "pipeline.tw" as pipe
