@@ -1,11 +1,11 @@
 <p align="center">
-  <img alt="twill" src="https://raw.githubusercontent.com/martin-k-m/twill/main/assets/twill-mark.png" width="96">
+  <img alt="twill" src="https://raw.githubusercontent.com/twill-lang/twill/main/assets/twill-mark.png" width="96">
 </p>
 
 <h1 align="center">warp</h1>
 
 <p align="center">
-  <b>Data pipelines and dataset loaders for <a href="https://github.com/martin-k-m/twill">twill</a>.</b><br>
+  <b>Data pipelines and dataset loaders for <a href="https://github.com/twill-lang/twill">twill</a>.</b><br>
   Written in twill.
 </p>
 
@@ -235,11 +235,11 @@ docs/datasets.md  the digests, and what is still to verify
 
 ## The sibling repositories
 
-- [twill](https://github.com/martin-k-m/twill), the language.
-- [spool](https://github.com/martin-k-m/spool), the package manager. warp
+- [twill](https://github.com/twill-lang/twill), the language.
+- [spool](https://github.com/twill-lang/spool), the package manager. warp
   depends on it for `src/sha256.tw` rather than writing a second digest that
   would have to agree with it byte for byte.
-- [weft](https://github.com/martin-k-m/weft), plotting. warp loads it, weft
+- [weft](https://github.com/twill-lang/weft), plotting. warp loads it, weft
   draws it.
 
 ## Licence
