@@ -11,13 +11,13 @@ mode systems
 # compute, and moving f64 through the pipeline and the cache to hand the model
 # something it immediately narrows is moving twice the bytes for no gain.
 #
-# The seven codes are the language's, value for value (docs/dtypes.md in raster).
+# The seven codes are the language's, value for value (docs/dtypes.md in twill).
 # They are duplicated here rather than imported because warp is a systems-mode
 # library and the dtype set lives in the numeric half; when the systems subset
 # gains a tensor, this file and sample.tw's Batch.dtype collapse into it. The
-# same trade shuttle and raster's own buf.tw make, for the same import reason.
+# same trade shuttle and twill's own buf.tw make, for the same import reason.
 #
-# Nothing narrows a buffer yet: until raster NEEDS-111's packed buffer lands
+# Nothing narrows a buffer yet: until twill NEEDS-111's packed buffer lands
 # there is no Arr narrower than F64 to hold, so the dtype is metadata the cache
 # records and the consumer reads. When it lands, warp stores batches and cache
 # entries at the declared width and the bytes actually drop, with no code that
@@ -41,7 +41,7 @@ fn dtype_name(dt: I64) -> Str {
   "f64"
 }
 
-# Bytes per element once a packed buffer exists: raster's dtype_bits over eight.
+# Bytes per element once a packed buffer exists: twill's dtype_bits over eight.
 # This is what a dtype-aware cache size will multiply by; today every element is
 # eight bytes whatever this returns, which is the gap NEEDS-111 closes.
 fn elem_bytes(dt: I64) -> I64 {

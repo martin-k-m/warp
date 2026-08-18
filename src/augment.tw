@@ -222,7 +222,7 @@ fn gaussian(r: rng.Rng) -> F64 {
 # and that is deliberate, not incidental. A running sum over thousands of i8 or
 # bf16 samples in the sample's own narrow dtype loses the small terms once the
 # accumulator is a few hundred times their size, which is the exact failure
-# raster's acc_dtype rule exists to prevent: accumulate wide, narrow once on
+# twill's acc_dtype rule exists to prevent: accumulate wide, narrow once on
 # store. warp accumulates here in F64 and hands the result to the consumer, who
 # narrows it to the batch dtype at the boundary if it narrows at all.
 fn mean_of(xs: Arr[F64]) -> F64 {

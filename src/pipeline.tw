@@ -108,7 +108,7 @@ fn from_source(s: Source) -> Pipeline = Pipeline { source: s, stages: [], dtype:
 # carrying them at f64 and narrowing after. It is not a stage and does not round
 # anything here: warp holds Arr[F64] and the systems subset has no narrower array
 # yet, so the declaration travels on the batch and the consumer acts on it. When
-# raster NEEDS-111's packed buffer lands, this is where a real narrow store hangs
+# twill NEEDS-111's packed buffer lands, this is where a real narrow store hangs
 # off. It is part of the cache key, so changing it misses rather than misreads.
 fn astype(p: Pipeline, dtype: I64) -> Pipeline {
   p.dtype = dtype

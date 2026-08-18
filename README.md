@@ -30,7 +30,7 @@ twill on every push rather than gating on the prose in this file.
 twill test tests
 ```
 
-You need twill 1.6.0-rc1 or newer. `docs/needs.md` is still worth reading -- it
+You need twill 1.6.0-rc2 or newer. `docs/needs.md` is still worth reading -- it
 is the list of what this library asked the language for, and it now records
 which of those arrived and which are still open.
 
@@ -39,7 +39,7 @@ which of those arrived and which are still open.
 | Piece | State |
 | --- | --- |
 | Composable pipeline: map, filter, batch, shuffle, prefetch, repeat | written, unrun |
-| A declared dtype carried to the batch, so the model builds it narrow not at f64 | written; bytes gated on raster NEEDS-111 |
+| A declared dtype carried to the batch, so the model builds it narrow not at f64 | written; bytes gated on twill NEEDS-111 |
 | The order check that catches shuffle-after-batch | written, unrun |
 | Disk cache keyed on the transformation chain | written, blocked on file IO |
 | Augmentation for images and sequences, each seeded explicitly | written, unrun |
@@ -78,7 +78,7 @@ fn build(src: pipe.Source, epoch: I64) -> pipe.Pipeline {
   # Scaled pixels are meant for f32, so declare it: the batch carries the dtype
   # and the model builds its tensor narrow in one step rather than at f64 and a
   # cast after, which moves twice the bytes for nothing. A declaration today, a
-  # real narrow store once raster NEEDS-111 lands; either way the cache keys on
+  # real narrow store once twill NEEDS-111 lands; either way the cache keys on
   # it, so f32 and bf16 runs never share an entry.
   p = pipe.astype(p, dt.DT_F32)
 

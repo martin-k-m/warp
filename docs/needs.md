@@ -174,9 +174,9 @@ This is the largest design question on the list and it is a language-level one:
 `mode systems` was defined by what a compiler needs, and a data loader is the
 first program that wants both halves at once.
 
-Since this entry was written, the numeric half grew narrow dtypes (raster
+Since this entry was written, the numeric half grew narrow dtypes (twill
 `docs/dtypes.md`): seven of them, a `.to(dt)` cast, and a packed byte buffer
-designed under raster NEEDS-111. warp now carries a declared dtype on the
+designed under twill NEEDS-111. warp now carries a declared dtype on the
 pipeline and the batch (`src/dtype.tw`, `pipe.astype`), so a consumer building
 the tensor at the boundary builds it at the width the data was meant for, f32
 for scaled pixels, i32 for labels, rather than at f64 and narrowing after, which
