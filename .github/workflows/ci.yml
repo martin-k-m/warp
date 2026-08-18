@@ -47,10 +47,6 @@ jobs:
             exit 1
           fi
 
-      - name: The README still says it does not run
-        run: |
-          grep -q "warp does not run yet" README.md
-
       - name: Every test file is wired into the suite
         run: |
           for f in tests/*_test.tw; do
@@ -78,3 +74,36 @@ jobs:
             echo "a dataset has no licence recorded"
             exit 1
           fi
+
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The twill binary comes from a release rather than being built here.
+      # warp is written in twill and has no build of its own, so the only
+      # thing CI needs is a compiler, and a released one is the version a user
+      # would have. Pinned rather than floating: a green run should mean this
+      # code passed against a known compiler, not against whatever was newest
+      # that morning.
+      - name: Install twill v1.6.0-rc1
+        run: |
+          curl -fsSL -o twill \
+            https://github.com/twill-lang/twill/releases/download/v1.6.0-rc1/twill-v1.6.0-rc1-linux-amd64
+          chmod +x twill
+          ./twill --version
+
+      - name: Check every source file
+        run: |
+          skip=""
+          fail=0
+          for f in $(find src tests examples -name '*.tw' 2>/dev/null); do
+            case " $skip " in *" $f "*) continue ;; esac
+            if ! ./twill check "$f"; then
+              fail=1
+            fi
+          done
+          exit $fail
+
+      - name: Run the tests
+        run: ./twill test tests

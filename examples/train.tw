@@ -50,6 +50,23 @@ fn main() {
   }
 }
 
+# Where a model would go. This example is about the pipeline that feeds one, so
+# the step counts what it was handed and returns; a real one takes the same
+# batch and does a forward and a backward pass with it.
+#
+# It is a real function rather than a name left dangling, because an example
+# that does not check is an example that has stopped being true about the
+# library it demonstrates.
+fn train_step(b: pipe.Batch) {
+  STEPS = STEPS + 1
+  if STEPS % 100 == 0 {
+    write_out("step " + str(STEPS) + ", " + str(len(b.samples)) + " samples
+")
+  }
+}
+
+let STEPS: I64 = 0
+
 fn build(src: pipe.Source, epoch: I64) -> pipe.Pipeline {
   let p = pipe.from_source(src)
 
