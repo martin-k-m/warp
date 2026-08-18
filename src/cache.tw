@@ -104,16 +104,30 @@ fn explain(c: Cache, p: pipe.Pipeline) -> Str {
 # Point 3 above, as a function. Batching, prefetching and repeating change how
 # samples are grouped, buffered and how often they are produced, and none of
 # them changes what a sample contains.
+#
+# The match is exhaustive on purpose and there is no `_`. A seventh stage kind
+# defaults to nothing here: it would have to be listed, and whoever adds it has
+# to answer the one question that matters, which is whether it changes what a
+# sample contains. Getting that answer wrong by omission is a wrong cache hit.
 fn affects_values(st: pipe.Stage) -> Bool {
-  if st.kind == pipe.BATCH { return false }
-  if st.kind == pipe.PREFETCH { return false }
-  if st.kind == pipe.REPEAT { return false }
-  true
+  match st.kind {
+    Kind.Batch => false,
+    Kind.Prefetch => false,
+    Kind.Repeat => false,
+    Kind.Map => true,
+    Kind.Filter => true,
+    Kind.Shuffle => true,
+  }
 }
 
-fn path_of(c: Cache, k: Str) -> Str = c.dir + "/" + slice(k, 0, 2) + "/" + k + ".warp"
+# The two-character fanout directory keeps a cache of a hundred thousand entries
+# off one directory listing. `path_join` rather than `+ "/" +` so the separator
+# is the library's business: it emits a forward slash everywhere, which is what
+# the previous concatenation happened to do, and it also collapses a trailing
+# slash on a directory the user handed in.
+fn path_of(c: Cache, k: Str) -> Str = path_join(path_join(c.dir, slice(k, 0, 2)), k + ".warp")
 
-fn manifest_of(c: Cache, k: Str) -> Str = c.dir + "/" + slice(k, 0, 2) + "/" + k + ".toml"
+fn manifest_of(c: Cache, k: Str) -> Str = path_join(path_join(c.dir, slice(k, 0, 2)), k + ".toml")
 
 # ── Reading and writing ─────────────────────────────────────────────────────
 
@@ -133,7 +147,7 @@ fn has(c: Cache, p: pipe.Pipeline) -> Bool = path_exists(path_of(c, key(c, p)))
 
 fn write(c: Cache, p: pipe.Pipeline, batches: Arr[smp.Batch]) -> Str {
   let k = key(c, p)
-  mkdir_all(c.dir + "/" + slice(k, 0, 2))
+  mkdir_all(path_join(c.dir, slice(k, 0, 2)))
   # Written to a temporary name and renamed into place. A cache entry that is
   # half written when a run is interrupted is worse than no entry, because its
   # key says it is complete and every later run will read it.
@@ -239,11 +253,11 @@ fn prune(c: Cache, keep_days: I64, now: I64) -> I64 {
   let entries = list_dir(c.dir)
   let i: I64 = 0
   while i < len(entries) {
-    let sub = c.dir + "/" + entries[i]
+    let sub = path_join(c.dir, entries[i])
     let files = list_dir(sub)
     let j: I64 = 0
     while j < len(files) {
-      let f = sub + "/" + files[j]
+      let f = path_join(sub, files[j])
       if now - mtime(f) > keep_days * 86400 {
         remove_all(f)
         removed = removed + 1

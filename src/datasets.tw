@@ -137,7 +137,7 @@ fn verify(d: Dataset, dir: Str) -> Str {
   let i: I64 = 0
   while i < len(d.files) {
     let f = d.files[i]
-    let path = dir + "/" + f.name
+    let path = path_join(dir, f.name)
     if !path_exists(path) {
       return "missing " + path + "; download it from " + f.url
     }

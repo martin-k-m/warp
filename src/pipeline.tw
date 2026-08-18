@@ -55,12 +55,15 @@ import "sample.tw" as smp
 import "rng.tw" as rng
 import "dtype.tw" as dt
 
-let MAP: I64 = 0
-let FILTER: I64 = 1
-let BATCH: I64 = 2
-let SHUFFLE: I64 = 3
-let PREFETCH: I64 = 4
-let REPEAT: I64 = 5
+# The six stages warp has, as a type rather than as six integers. The whole of
+# the difference is that adding a seventh is now a check-time error in every
+# place that dispatches on the kind -- `describe_stage` here and
+# `affects_values` in `cache.tw` -- instead of an if-ladder that falls off the
+# end and returns a plausible answer for a stage it does not understand. The
+# cache key is built from `describe_stage`, so falling off the end there is a
+# stage that hashes to the same key as a different stage, which is exactly the
+# failure the whole of `cache.tw`'s preamble is written to avoid.
+enum Kind { Map, Filter, Batch, Shuffle, Prefetch, Repeat }
 
 # A stage carries a name as well as a function. The name is not documentation:
 # it is the stage's identity in the cache key, because a function value has no
@@ -68,7 +71,7 @@ let REPEAT: I64 = 5
 # whose behaviour changes must change its name or its version. That obligation
 # is on the caller and it is the price of a cache that does not serve stale data.
 struct Stage {
-  kind: I64,
+  kind: Kind,
   name: Str,
   version: I64,
   n: I64,           # batch size, buffer size, prefetch depth, repeat count
@@ -112,7 +115,7 @@ fn astype(p: Pipeline, dtype: I64) -> Pipeline {
   p
 }
 
-fn blank_stage(kind: I64, name: Str) -> Stage = Stage {
+fn blank_stage(kind: Kind, name: Str) -> Stage = Stage {
   kind: kind, name: name, version: 1, n: 0, drop_last: false, seed: 0,
   fn_map: identity, fn_keep: keep_all,
 }
@@ -121,7 +124,7 @@ fn identity(s: smp.Sample) -> smp.Sample = s
 fn keep_all(s: smp.Sample) -> Bool = true
 
 fn map(p: Pipeline, name: Str, version: I64, f: Fn(smp.Sample) -> smp.Sample) -> Pipeline {
-  let st = blank_stage(MAP, name)
+  let st = blank_stage(Kind.Map, name)
   st.version = version
   st.fn_map = f
   p.stages.push(st)
@@ -129,7 +132,7 @@ fn map(p: Pipeline, name: Str, version: I64, f: Fn(smp.Sample) -> smp.Sample) ->
 }
 
 fn filter(p: Pipeline, name: Str, version: I64, f: Fn(smp.Sample) -> Bool) -> Pipeline {
-  let st = blank_stage(FILTER, name)
+  let st = blank_stage(Kind.Filter, name)
   st.version = version
   st.fn_keep = f
   p.stages.push(st)
@@ -140,7 +143,7 @@ fn filter(p: Pipeline, name: Str, version: I64, f: Fn(smp.Sample) -> Bool) -> Pi
 # tail silently discards up to batch_size - 1 examples per epoch, which on a
 # small validation set is a measurable and invisible change to the metric.
 fn batch(p: Pipeline, n: I64, drop_last: Bool) -> Pipeline {
-  let st = blank_stage(BATCH, "batch")
+  let st = blank_stage(Kind.Batch, "batch")
   st.n = n
   st.drop_last = drop_last
   p.stages.push(st)
@@ -157,7 +160,7 @@ fn batch(p: Pipeline, n: I64, drop_last: Bool) -> Pipeline {
 # the single most common silent failure in a data pipeline, and it is why the
 # buffer is an argument and not a default.
 fn shuffle(p: Pipeline, buffer: I64, seed: I64) -> Pipeline {
-  let st = blank_stage(SHUFFLE, "shuffle")
+  let st = blank_stage(Kind.Shuffle, "shuffle")
   st.n = buffer
   st.seed = seed
   p.stages.push(st)
@@ -169,7 +172,7 @@ fn shuffle(p: Pipeline, buffer: I64, seed: I64) -> Pipeline {
 # latency; deeper only helps when load times vary a lot, and each extra level
 # costs a batch of memory.
 fn prefetch(p: Pipeline, depth: I64) -> Pipeline {
-  let st = blank_stage(PREFETCH, "prefetch")
+  let st = blank_stage(Kind.Prefetch, "prefetch")
   st.n = depth
   p.stages.push(st)
   p
@@ -179,7 +182,7 @@ fn prefetch(p: Pipeline, depth: I64) -> Pipeline {
 # and expressing it as a count of zero rather than a separate stage keeps the
 # stage list uniform, which matters because the cache key walks it.
 fn repeat(p: Pipeline, count: I64) -> Pipeline {
-  let st = blank_stage(REPEAT, "repeat")
+  let st = blank_stage(Kind.Repeat, "repeat")
   st.n = count
   p.stages.push(st)
   p
@@ -193,10 +196,10 @@ fn repeat(p: Pipeline, count: I64) -> Pipeline {
 # library people work around by not using it.
 fn validate(p: Pipeline) -> Arr[Str] {
   let out: Arr[Str] = []
-  let batch_at = index_of_kind(p, BATCH)
-  let shuffle_at = index_of_kind(p, SHUFFLE)
-  let repeat_at = index_of_kind(p, REPEAT)
-  let prefetch_at = index_of_kind(p, PREFETCH)
+  let batch_at = index_of_kind(p, Kind.Batch)
+  let shuffle_at = index_of_kind(p, Kind.Shuffle)
+  let repeat_at = index_of_kind(p, Kind.Repeat)
+  let prefetch_at = index_of_kind(p, Kind.Prefetch)
   if batch_at >= 0 && shuffle_at > batch_at {
     out.push("shuffle after batch: the same samples will travel together for the whole run. Shuffle before batch unless that is deliberate.")
   }
@@ -209,7 +212,7 @@ fn validate(p: Pipeline) -> Arr[Str] {
   out
 }
 
-fn index_of_kind(p: Pipeline, kind: I64) -> I64 {
+fn index_of_kind(p: Pipeline, kind: Kind) -> I64 {
   let i: I64 = 0
   while i < len(p.stages) {
     if p.stages[i].kind == kind { return i }
@@ -246,7 +249,7 @@ fn iterate(p: Pipeline) -> Iter = Iter {
 fn seed_of(p: Pipeline) -> I64 {
   let i: I64 = 0
   while i < len(p.stages) {
-    if p.stages[i].kind == SHUFFLE { return p.stages[i].seed }
+    if p.stages[i].kind == Kind.Shuffle { return p.stages[i].seed }
     i = i + 1
   }
   0
@@ -295,11 +298,18 @@ fn apply_stages(p: Pipeline, s: smp.Sample) -> Opt[smp.Sample] {
   let i: I64 = 0
   while i < len(p.stages) {
     let st = p.stages[i]
-    if st.kind == MAP {
-      cur = st.fn_map(cur)
-    } else if st.kind == FILTER {
-      if !st.fn_keep(cur) { return Opt.None }
+    # Only map and filter touch a sample. The other four are named here rather
+    # than swept into a `_` so that a seventh kind has to say what it does to a
+    # sample instead of quietly doing nothing to it.
+    let keep = match st.kind {
+      Kind.Map => { cur = st.fn_map(cur); true },
+      Kind.Filter => st.fn_keep(cur),
+      Kind.Batch => true,
+      Kind.Shuffle => true,
+      Kind.Prefetch => true,
+      Kind.Repeat => true,
     }
+    if !keep { return Opt.None }
     i = i + 1
   }
   Opt.Some(cur)
@@ -349,7 +359,7 @@ fn raw_next(it: Iter) -> Opt[smp.Sample] {
 fn next_index(it: Iter) -> Opt[I64] {
   if it.cursor >= it.p.source.count {
     let reps = repeat_count(it.p)
-    let unlimited = reps == 0 && has_kind(it.p, REPEAT)
+    let unlimited = reps == 0 && has_kind(it.p, Kind.Repeat)
     if !unlimited && it.epoch + 1 >= max_epochs(it.p) { return Opt.None }
     it.epoch = it.epoch + 1
     it.cursor = 0
@@ -361,30 +371,30 @@ fn next_index(it: Iter) -> Opt[I64] {
 
 fn max_epochs(p: Pipeline) -> I64 {
   let r = repeat_count(p)
-  if !has_kind(p, REPEAT) { return 1 }
+  if !has_kind(p, Kind.Repeat) { return 1 }
   if r == 0 { return 0 }
   r
 }
 
 fn repeat_count(p: Pipeline) -> I64 {
-  let i = index_of_kind(p, REPEAT)
+  let i = index_of_kind(p, Kind.Repeat)
   if i < 0 { 1 } else { p.stages[i].n }
 }
 
-fn has_kind(p: Pipeline, kind: I64) -> Bool = index_of_kind(p, kind) >= 0
+fn has_kind(p: Pipeline, kind: Kind) -> Bool = index_of_kind(p, kind) >= 0
 
 fn batch_size(p: Pipeline) -> I64 {
-  let i = index_of_kind(p, BATCH)
+  let i = index_of_kind(p, Kind.Batch)
   if i < 0 { 1 } else { p.stages[i].n }
 }
 
 fn drop_last(p: Pipeline) -> Bool {
-  let i = index_of_kind(p, BATCH)
+  let i = index_of_kind(p, Kind.Batch)
   if i < 0 { false } else { p.stages[i].drop_last }
 }
 
 fn shuffle_buffer(p: Pipeline) -> I64 {
-  let i = index_of_kind(p, SHUFFLE)
+  let i = index_of_kind(p, Kind.Shuffle)
   if i < 0 { 0 } else { p.stages[i].n }
 }
 
@@ -405,16 +415,18 @@ fn describe(p: Pipeline) -> Str {
 }
 
 fn describe_stage(st: Stage) -> Str {
-  if st.kind == MAP { return "map " + st.name + " v" + str(st.version) }
-  if st.kind == FILTER { return "filter " + st.name + " v" + str(st.version) }
-  if st.kind == BATCH { return "batch " + str(st.n) + " drop_last=" + str_bool(st.drop_last) }
-  if st.kind == SHUFFLE { return "shuffle " + str(st.n) + " seed=" + str(st.seed) }
   # Prefetch and repeat are named but carry no parameter into the description.
   # Prefetch cannot change a sample's value, and repeat only changes how many
   # times the same values are produced. Including either would make a cache
   # entry miss when the user changed a knob that cannot affect the bytes.
-  if st.kind == PREFETCH { return "prefetch" }
-  "repeat"
+  match st.kind {
+    Kind.Map => "map " + st.name + " v" + str(st.version),
+    Kind.Filter => "filter " + st.name + " v" + str(st.version),
+    Kind.Batch => "batch " + str(st.n) + " drop_last=" + str_bool(st.drop_last),
+    Kind.Shuffle => "shuffle " + str(st.n) + " seed=" + str(st.seed),
+    Kind.Prefetch => "prefetch",
+    Kind.Repeat => "repeat",
+  }
 }
 
 fn str_bool(b: Bool) -> Str = if b { "true" } else { "false" }
