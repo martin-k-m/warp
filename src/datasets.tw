@@ -133,36 +133,36 @@ fn all() -> Arr[Dataset] = [mnist(), fashion_mnist(), cifar10(), iris()]
 #
 # The size is checked before the digest because reading 170 megabytes to
 # discover that the download was an HTML error page is a slow way to learn it.
-fn verify(d: Dataset, dir: Str) -> Str {
+fn verify(d: Dataset, dir: Str) -> Res[Unit, Str] {
   let i: I64 = 0
   while i < len(d.files) {
     let f = d.files[i]
     let path = path_join(dir, f.name)
     if !path_exists(path) {
-      return "missing " + path + "; download it from " + f.url
+      return Err("missing " + path + "; download it from " + f.url)
     }
     let size = file_size(path)
     if size != f.bytes {
-      return f.name + " is " + str(size) + " bytes, expected " + str(f.bytes) +
-        ". A download that is much smaller than expected is usually an error page."
+      return Err(f.name + " is " + str(size) + " bytes, expected " + str(f.bytes) +
+        ". A download that is much smaller than expected is usually an error page.")
     }
     match read_file(path) {
-      Res.Err(e) => return "cannot read " + path + ": " + e,
+      Res.Err(e) => return Err("cannot read " + path + ": " + e),
       Res.Ok(body) => {
         let got = sha.hash_str(body)
         if len(f.sha256) == 0 {
-          return f.name + " has no pinned digest in warp. Its sha256 is " + got +
-            ". Record it in src/datasets.tw and in docs/datasets.md before training on it."
+          return Err(f.name + " has no pinned digest in warp. Its sha256 is " + got +
+            ". Record it in src/datasets.tw and in docs/datasets.md before training on it.")
         }
         if got != f.sha256 {
-          return f.name + " failed verification. Expected " + f.sha256 + ", got " + got +
-            ". Delete the file and download it again; if it fails twice, do not use it."
+          return Err(f.name + " failed verification. Expected " + f.sha256 + ", got " + got +
+            ". Delete the file and download it again; if it fails twice, do not use it.")
         }
       },
     }
     i = i + 1
   }
-  ""
+  Ok(unit)
 }
 
 # ── The IDX format ──────────────────────────────────────────────────────────

@@ -20,10 +20,12 @@ fn main() {
 
   # Verification first, and it refuses rather than warns. Training on the wrong
   # bytes is not something a log line prevents.
-  let problem = ds.verify(d, DATA_DIR)
-  if len(problem) > 0 {
-    write_err("warp: " + problem + "\n")
-    exit(1)
+  match ds.verify(d, DATA_DIR) {
+    Res.Ok(_) => unit,
+    Res.Err(problem) => {
+      write_err("warp: " + problem + "\n")
+      exit(1)
+    },
   }
 
   let src = load_mnist(d)
@@ -110,4 +112,6 @@ fn read_idx_or_die(path: Str) -> ds.Idx {
   }
 }
 
-main()
+# No `main()` call here on purpose. `twill run` executes a systems-mode file's
+# top level and THEN calls `main()` itself, which it has done since twill
+# 1.6.1, so a file that also calls it trains the model twice.

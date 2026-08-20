@@ -192,12 +192,20 @@ to the point a narrow store hangs off, and the cache already keys on it.
 not state
 **Used by:** `src/pipeline.tw` (`Arr[Stage]`), `src/datasets.tw` (`Arr[File]`),
 `src/cache.tw` (`Arr[smp.Batch]`)
-**Status:** section 1.2 offers unconstrained monomorphized generics and flags
-the estimate as uncertain.
+**Status:** done, and the estimate this entry worried about was wrong in the
+useful direction. `Arr[T]` over a user struct works and is checked, and twill
+1.7 went further and closed NEEDS-4, so a declaration here could take its own
+type parameters if it wanted any.
 
-Nothing warp does is exotic: no bounds, no nesting beyond `Arr[Arr[F64]]`. It is
-listed so the requirement is on record from a second program, since the design
-document says this is the item most likely to be underestimated.
+The uncertain estimate was for monomorphization, which turned out not to be
+needed at all: twill's runtime is a tree walker over dynamically typed values,
+so the same code runs whatever `T` is and the parameters only have to reach the
+checker. Nothing warp does is exotic -- no bounds, no nesting beyond
+`Arr[Arr[F64]]` -- and none of it ever needed the expensive half.
+
+Also done, on twill 1.7: `datasets.verify` returned a `Str` that was empty on
+success and returns `Res[Unit, Str]`, which is the last error channel in warp
+that was not already a `Res`.
 
 ### 13. A test runner
 
