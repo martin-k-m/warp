@@ -111,3 +111,6 @@ jobs:
 
       - name: Run the tests
         run: ./twill test tests
+
+      # No example-run step. examples/train.tw needs the MNIST files, which are
+      # a download the CI job deliberately does not make.
