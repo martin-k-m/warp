@@ -32,6 +32,16 @@ the cost of a false pass is an experiment run on the wrong bytes.
 against the publisher's own checksum where one is published, and record the
 digest in both places.
 
+Running `verify` and pasting back what it printed does not close this. That
+records what warp read off whatever the mirror served, which is the thing the
+digest is supposed to be independent of. The README shows the refusal, digest
+and all, precisely because that number is not yet worth pinning.
+
+Expect it to be slow. `std/hash` is SHA-256 written in twill, and MNIST's
+9.9 MB training file took about four minutes on the machine that produced the
+line in the README. `verify` checking the size first is what keeps that cost
+off the common failure.
+
 ## The size check comes first
 
 `verify` compares the file size before it computes a digest. Reading 170
@@ -88,6 +98,10 @@ learn it, and a wrong size is the overwhelmingly common failure.
   Annals of Eugenics 7(2), 1936.
 - **Licence.** CC BY 4.0 as distributed by UCI.
 - **Format.** CSV, 150 rows, four features, three classes.
+- **Note on the download.** The URL in `src/datasets.tw` is UCI's zip, and the
+  file warp names and sizes is `iris.data`, the CSV inside it. Unzip first, the
+  same manual step the gzipped IDX files need and for the same reason: twill
+  cannot decompress. See entry 9 of `docs/needs.md`.
 - **Note.** Published in a eugenics journal by an author who was a proponent of
   it. It is included because it is everywhere and small enough to be useful in a
   test, and the provenance is recorded because people should know what they are

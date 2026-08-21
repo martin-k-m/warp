@@ -154,6 +154,64 @@ fn an_entry_from_a_future_format_is_a_miss_and_not_an_error() {
   }
 }
 
+# ── The disk path ───────────────────────────────────────────────────────────
+#
+# Every test above this point is arithmetic on strings and never touches a
+# file. twill 1.7 has the file IO the cache is written against, so the round
+# trip is checkable now, and it is the half that a keying bug cannot reach.
+
+# `temp_dir` makes a fresh directory under the system temporary one and hands
+# back its path, so two runs of this file never share a cache.
+fn scratch() -> Str =
+  match temp_dir("warp-cache-test") {
+    Res.Err(_) => "/tmp/warp-cache-test",
+    Res.Ok(d) => d,
+  }
+
+fn an_entry_written_to_disk_reads_back() {
+  let dir = scratch()
+  let c = cache.open(dir)
+  let p = base()
+  let b = smp.Batch { x: [1.0, 2.0], y: [0.0, 1.0], ids: [0, 1], n: 2,
+    shape: [1], dtype: dtype.DT_F32 }
+
+  t.check("a fresh directory is a miss", !cache.has(c, p))
+  let k = cache.write(c, p, [b])
+  t.equal_i64("the key is 64 hex characters", len(k), 64)
+  t.check("the entry is there after a write", cache.has(c, p))
+  match cache.read(c, p) {
+    Opt.None => t.check("the entry read back", false),
+    Opt.Some(out) => {
+      t.equal_i64("one batch came back", len(out), 1)
+      t.equal_i64("the batch kept its width", out[0].n, 2)
+      t.equal_i64("the batch kept its dtype", out[0].dtype, dtype.DT_F32)
+    },
+  }
+  t.check("nothing is newer than the entry", cache.is_fresh(c, p, []))
+  let _ = remove_all(dir)
+}
+
+fn prune_removes_an_expired_entry() {
+  let dir = scratch()
+  let c = cache.open(dir)
+  let p = base()
+  let b = smp.Batch { x: [1.0], y: [0.0], ids: [0], n: 1, shape: [1], dtype: dtype.DT_F64 }
+  let _ = cache.write(c, p, [b])
+  # A far-future `now` with a zero-day retention expires everything on disk,
+  # which avoids a test that has to wait for a clock.
+  t.check("an expired entry was removed", cache.prune(c, 0, 4102444800) > 0)
+  t.check("the entry is gone", !cache.has(c, p))
+  let _ = remove_all(dir)
+}
+
+fn prune_on_a_directory_that_does_not_exist_is_quiet() {
+  # `list_dir` returns a `Res`, and a cache directory that has never been
+  # written to is the normal state on a first run, not an error.
+  let dir = path_join(scratch(), "never-written")
+  t.equal_i64("nothing to prune, nothing removed",
+    cache.prune(cache.open(dir), 0, 4102444800), 0)
+}
+
 fn contains(hay: Str, needle: Str) -> Bool {
   let n = len(needle)
   let i: I64 = 0
@@ -181,4 +239,7 @@ the_cache_format_version_is_part_of_the_key()
 a_batch_survives_encoding_and_decoding()
 a_truncated_entry_decodes_to_nothing_rather_than_half_a_dataset()
 an_entry_from_a_future_format_is_a_miss_and_not_an_error()
+an_entry_written_to_disk_reads_back()
+prune_removes_an_expired_entry()
+prune_on_a_directory_that_does_not_exist_is_quiet()
 t.report("cache")

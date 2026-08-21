@@ -1,19 +1,30 @@
 # What warp needs from twill
 
-warp is written in twill and does not run yet. This file is the reason: the
-language and runtime features the source uses that `mode systems` does not
-provide today, with the file and function that needs each one and what warp does
-in the meantime.
+warp is written in twill and it runs: `twill test tests` passes five suites on
+twill 1.7.1. This file is what warp asked the language for on the way there,
+with the file and function that needed each one, what warp did in the meantime,
+and whether it has arrived.
 
 It is a work queue for the language, not a complaint. Every entry was reached by
 writing real code and hitting the wall.
+
+**Where this stands on twill 1.7.1.** Delivered: 1 function values and closures,
+2 `F64`, 3 float math, 4 writing files and directories, 5 ranged reads, 7 the
+sign of `shr`, 12 generic containers, 13 a test runner. Open: 6 number parsing,
+8 `Bytes` distinct from `Str`, 9 decompression, 10 networking or a process
+interface, 11 a tensor across the seam, 14 an iteration protocol, and 15 below,
+which this repository found while writing the getting-started section. Each
+entry carries the check that settled it.
 
 The baseline is milestone 1 of `docs/self-hosting.md` in the twill repository:
 `mode systems`, `I64` with bitwise operations, `Str` with length, byte indexing
 and slicing, `Arr[T]`, `Dict[Str, V]`, `struct`, `enum` with exhaustive `match`,
 `Opt` and `Res`, and `read_file`. Everything below is beyond that.
 
-## Blocking: warp cannot load anything without these
+## Was blocking: warp could not load anything without these
+
+All five arrived. Kept, rather than deleted, because the argument for each one is
+why it was asked for and the next library to want it can point here.
 
 ### 1. Function values with a declared type
 
@@ -21,8 +32,10 @@ and slicing, `Arr[T]`, `Dict[Str, V]`, `struct`, `enum` with exhaustive `match`,
 can declare, and closures over the enclosing scope
 **Used by:** `src/pipeline.tw` (`Stage.fn_map`, `Stage.fn_keep`, `Source.get`),
 `src/datasets.tw` (`idx_source`, `csv_source`)
-**Status:** numeric mode has first-class functions and closures. `mode systems`
-does not say whether it keeps them, and section 1.2 mentions no function type.
+**Status: delivered.** `mode systems` has `Fn(A) -> B` as a declarable type and
+closures over the enclosing scope, checked with `twill check` and run. Every
+`Source.get` and every `map` stage in this library is one, and the pipeline
+tests exercise both.
 
 This is the whole shape of the library. A pipeline is a list of user functions,
 and a source is a function from an index to a sample. Without function values
@@ -38,8 +51,9 @@ needed and not only function pointers.
 `i64(F64)`
 **Used by:** `src/sample.tw`, `src/augment.tw`, `src/strutil.tw`, and every
 sample warp has ever seen
-**Status:** `docs/self-hosting.md` names `F64` once, as an enum payload in the
-token example, and specifies nothing else. Section 1.2 is about `I64`.
+**Status: delivered.** `F64` literals, arithmetic, comparison and `f64(I64)` /
+`i64(F64)` all work in `mode systems`. `src/sample.tw` and the augmentation
+suite are float end to end.
 
 The systems subset was designed around a compiler, where integers are the whole
 job. A data loader's payload is floats. This is the same entry weft records, and
@@ -49,8 +63,9 @@ it being on both lists is the argument for it.
 
 **Needs:** `sqrt`, `log`, `cos` on `F64`
 **Used by:** `src/augment.tw` (`gaussian`, `stddev_of`)
-**Status:** these exist in numeric mode as differentiable tensor operations.
-Whether they exist on a systems-mode `F64` is unspecified.
+**Status: delivered.** `sqrt`, `log` and `cos` take a systems-mode `F64` and
+return one. `aug.gaussian` runs, and `tests/augment_test.tw` covers the jitter
+that depends on it.
 
 Box-Muller needs `sqrt`, `log` and `cos` and there is no way around it. Gaussian
 noise is not optional in an augmentation library.
@@ -61,8 +76,17 @@ noise is not optional in an augmentation library.
 `remove_all`, `file_size`, `mtime`
 **Used by:** `src/cache.tw` (`write`, `is_fresh`, `prune`), `src/datasets.tw`
 (`verify`), `src/stream.tw` (`open`, `reopen`)
-**Status:** `write_file` is in section 1.2 and `list_dir` is mentioned in
-passing. The rest are not, and spool records the same gap.
+**Status: delivered.** `write_file`, `rename`, `mkdir_all`, `path_exists`,
+`list_dir`, `remove_all`, `file_size` and `mtime` all exist, and `temp_dir` came
+with them, which is what lets a test write to a scratch directory instead of a
+hard-coded `/tmp`. `cache.write`, `cache.read`, `cache.has` and `cache.prune`
+now run against real files in `tests/cache_test.tw`.
+
+One shape to watch: `list_dir` returns a `Res`, not an `Arr[Str]`. `cache.prune`
+was written against the bare array and called `len` on the `Res`, which is a
+runtime error and not a checker one, so it survived until something ran it.
+`mtime` returns -1 rather than an error for a path it cannot read, which is the
+convention `file_size` follows.
 
 Two are worth naming individually. `rename` must be atomic within a directory,
 because the cache writes to a temporary name and renames into place: an entry
@@ -75,7 +99,10 @@ design cannot rule out by construction.
 
 **Needs:** `read_file_at(path, offset, length) -> Res[Str, Str]`
 **Used by:** `src/stream.tw` (`fill`)
-**Status:** not in the design. `read_file` reads the whole file.
+**Status: delivered.** `read_file_at(path, offset, length)` returns
+`Res[Str, Str]`, which is the signature this entry asked for. `src/stream.tw`
+needed no change, and `tests/stream_test.tw` now reads a file larger than one
+`CHUNK` through it.
 
 This is the entire content of "streaming". A dataset that does not fit in memory
 cannot be read with a function whose only mode is to read all of it, and every
@@ -89,7 +116,9 @@ seeking API, one function.
 
 **Needs:** `parse_i64(Str) -> Res[I64, Str]`, `parse_f64(Str) -> Res[F64, Str]`
 **Used by:** `src/strutil.tw`, and through it every reader in the library
-**Status:** `str` goes one way and nothing comes back.
+**Status: open on twill 1.7.1.** `parse_i64` and `parse_f64` are still unknown
+names, so `src/strutil.tw` still carries warp's own parser and the reasoning
+below still applies.
 
 warp ships its own decimal and exponent parser. It is a hundred lines that every
 program reading a CSV will otherwise write again, and it will be subtly
@@ -106,8 +135,14 @@ whatever prints them, so that printing and parsing round trip.
 **Needs:** a statement of whether `shr` is arithmetic or logical, or two
 operators
 **Used by:** `src/rng.tw` (`mix`, `next`)
-**Status:** section 1.2 says shifts mask the shift count to 0..63 and says
-nothing about the sign.
+**Status: delivered.** twill's language guide now states that `shr` is
+arithmetic, shifting the sign bit in, and `shr(-8, 1)` is `-4`. There is no
+`ushr` operator; the guide gives the idiom for building one.
+
+`src/rng.tw` still masks to 32 bits, and that is now a choice rather than a
+constraint. Widening it would double the state on the hottest path in the
+loader, and it would also change every seeded sequence this library has ever
+produced, so it is a version bump and a cache-key change, not a cleanup.
 
 The generator masks everything to 32 bits after every step, so it never shifts a
 negative value, which is a real cost: it throws away half the width of the type
@@ -120,9 +155,9 @@ would have the same question.
 
 **Needs:** the `Bytes` type from section 1.2, and `read_file` returning it
 **Used by:** `src/datasets.tw` (`read_idx`, `be32`), `src/stream.tw`
-**Status:** `Bytes` is designed. `read_file` returning `Res[Bytes, Str]` is in
-the design; warp is written against a `Str` because that is what the milestone
-provides.
+**Status: half delivered.** `Bytes` is a type the checker accepts. `read_file`
+and `read_file_at` still hand back a `Str`, so warp still indexes IDX files as a
+byte string and the type still says "text" about data that is not.
 
 IDX files are binary and warp indexes them as a byte string. It works, since
 `Str` in the subset is bytes that print, and it means the type says "text" about
@@ -133,7 +168,7 @@ file is read and something has to decide whether to trust it as UTF-8.
 
 **Needs:** gzip, or a documented decision that the user decompresses first
 **Used by:** `src/datasets.tw` (MNIST and Fashion-MNIST ship as `.gz`)
-**Status:** not in the design, and reasonably so.
+**Status: open on twill 1.7.1**, and reasonably so.
 
 warp reads the decompressed IDX file and tells the user to gunzip it. That is an
 extra step in every getting-started guide forever. Not a language feature so
@@ -145,8 +180,9 @@ keeping the manual step and documenting it. Currently the third.
 
 **Needs:** an HTTPS fetch, or `run(program, argv, dir)`
 **Used by:** `src/datasets.tw`, which describes downloads it cannot perform
-**Status:** section 1.2 stops at "no sockets". spool records the same gap and
-argues for the process interface as the smaller ask.
+**Status: open on twill 1.7.1.** There is no socket and no process builtin, so
+neither half of this is available. spool records the same gap and argues for the
+process interface as the smaller ask.
 
 warp prints the URL and the expected size and asks the user to fetch the file.
 This is the entry warp is least unhappy about: a data-loading library that
@@ -161,8 +197,9 @@ verification step is more valuable than the fetching step. But it does mean
 **Needs:** `Tensor` usable from `mode systems`, or a stated conversion at the
 boundary
 **Used by:** `src/sample.tw` (the whole file)
-**Status:** tensors are the numeric half of the language. The systems subset
-says nothing about them.
+**Status: open on twill 1.7.1.** twill's language guide is explicit now:
+`mode systems` has no tensor type at all. So the seam is still a seam and
+`src/sample.tw` is still a tensor written out longhand.
 
 A sample is a flat `Arr[F64]` plus an `Arr[I64]` shape, which is a tensor
 written out longhand. Every consumer has to rebuild the tensor at the boundary,
@@ -211,20 +248,47 @@ that was not already a `Res`.
 
 **Needs:** a `twill test` that collects `tests/*_test.tw`
 **Used by:** everything in `tests/`
-**Status:** none. Same gap spool and weft record.
+**Status: delivered.** `twill test tests` collects the suites and reports them,
+and CI runs it against a pinned release.
 
-Every test file is a program that calls its cases at the bottom and ends with
-`report`, which exits non-zero on a failure. A new test file is invisible to CI
-until someone adds it by hand.
+The harness stayed. Every test file is still a program that calls its cases at
+the bottom and ends with `report`, because that is what makes a file runnable on
+its own, and `twill test` runs it either way. A new test file is picked up
+without anyone adding it to a list. What is still done by hand is the call at
+the bottom of the file, and CI checks the last line is `t.report(` for exactly
+that reason.
 
 ### 14. A defined iteration protocol
 
 **Needs:** a `for x in thing` that works on a user type
 **Used by:** `src/pipeline.tw` (`Iter`), `src/stream.tw` (`next_line`)
-**Status:** `for` works on lists and 1-D tensors in numeric mode. There is no
+**Status: open on twill 1.7.1.** `for x in v` over a user struct passes the
+checker and fails at run time with "value is not iterable", so there is still no
 way for a user type to take part.
 
 Every consumer of a pipeline writes the same `while true { match next_batch(it)
 { ... } }`, and the `Opt.None` arm is where someone will eventually forget to
 break. Low priority, purely ergonomic, but it is the shape of every training
 loop that will ever use this library.
+
+## Found since
+
+### 15. Which directory a relative path is relative to
+
+**Needs:** a statement of what a relative path passed to `read_file`,
+`path_exists` or `write_file` resolves against
+**Used by:** `examples/train.tw`, and any program a user writes
+**Status:** open on twill 1.7.1, and undocumented rather than decided.
+
+`examples/train.tw` asks for `data/mnist`. Run as `twill run examples/train.tw`
+from the root of a clone, that reads `examples/data/mnist`: the path resolves
+against the directory of the file being run and not against the process's
+working directory. `cwd()` in the same program reports the working directory,
+so the two disagree and nothing in the language guide says which one file IO
+uses.
+
+Resolving against the script is defensible, and it is the choice that makes an
+example carry its own fixtures. The problem is only that it is unwritten, so
+the first thing a user does with this repository is put a 47 MB file in the
+wrong directory and get "missing" for a file that is plainly there. warp's
+README now says where the data goes; the language should say why.

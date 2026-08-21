@@ -128,8 +128,8 @@ fn all() -> Arr[Dataset] = [mnist(), fashion_mnist(), cifar10(), iris()]
 
 # ── Verification ────────────────────────────────────────────────────────────
 
-# Check every file of a dataset in `dir`. Returns an empty string when all of
-# them match, and otherwise the first failure, spelled out.
+# Check every file of a dataset in `dir`. `Ok` when all of them match, and
+# otherwise the first failure, spelled out.
 #
 # The size is checked before the digest because reading 170 megabytes to
 # discover that the download was an HTML error page is a slow way to learn it.
