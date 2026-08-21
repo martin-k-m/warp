@@ -26,31 +26,96 @@ here executed and this section said so. twill 1.6 is the release that closed it:
 the 5 test suites under `tests/` pass, and CI runs them against a released
 twill on every push rather than gating on the prose in this file.
 
+`docs/needs.md` is the list of what this library asked the language for, and
+it records which of those arrived and which are still open.
+
+## Getting started
+
+warp needs twill 1.7.0 or newer. There is nothing to build: warp is twill
+source and twill runs it.
+
+```bash
+curl -fsSL -o twill \
+  https://github.com/twill-lang/twill/releases/download/v1.7.1/twill-v1.7.1-linux-amd64
+chmod +x twill
+./twill --version
+```
+
+That prints `Twill 1.7.1`. Swap the suffix for the machine: `linux-amd64`,
+`linux-arm64`, `darwin-amd64`, `darwin-arm64` or `windows-amd64.exe`.
+
+Then the suites, from the root of a clone:
+
 ```bash
 twill test tests
 ```
 
-You need twill 1.7.0 or newer. `docs/needs.md` is still worth reading -- it
-is the list of what this library asked the language for, and it now records
-which of those arrived and which are still open.
+```
+ok    tests/augment_test.tw
+ok    tests/cache_test.tw
+ok    tests/datasets_test.tw
+ok    tests/pipeline_test.tw
+ok    tests/stream_test.tw
+
+5 file(s): 5 passed, 0 failed
+```
+
+### The example wants MNIST, and will not fetch it
+
+`examples/train.tw` reads the real MNIST files. twill has no network, so the
+download is your step, and twill cannot decompress, so the gunzip is your step
+too. Both are recorded in `docs/needs.md`.
+
+The files go under `examples/`, not under the root of the clone: a relative
+path in a twill program resolves against the directory of the file being run,
+and `examples/train.tw` asks for `data/mnist`.
+
+```bash
+mkdir -p examples/data/mnist
+for f in train-images-idx3-ubyte train-labels-idx1-ubyte \
+         t10k-images-idx3-ubyte t10k-labels-idx1-ubyte; do
+  curl -fsSL -o "examples/data/mnist/$f.gz" \
+    "https://storage.googleapis.com/cvdf-datasets/mnist/$f.gz"
+done
+gunzip -k examples/data/mnist/*.gz
+twill run examples/train.tw
+```
+
+That stops, on purpose, at the first thing warp checks:
+
+```
+warp: train-images-idx3-ubyte.gz has no pinned digest in warp. Its sha256 is 440fcabf73cc546fa21475e81ea370265605f56be210a4024d2ca8f203523609. Record it in src/datasets.tw and in docs/datasets.md before training on it.
+```
+
+Exit status 1. That is the refusal described under **Datasets** below, not a
+bug: no digest in this repository is pinned yet, and warp will not read a
+dataset whose bytes it cannot check. Expect to wait for it. sha256 is written
+in twill, in `std/hash`, and the 9.9 MB training file took about four minutes
+on the machine that produced the line above.
 
 ## Status
 
+Every row that claims something works names the test that says so. A row that
+says warp is not wired up means twill delivered the feature and warp has not
+been changed to use it, which is not the same as being blocked.
+
 | Piece | State |
 | --- | --- |
-| Composable pipeline: map, filter, batch, shuffle, prefetch, repeat | written, unrun |
-| A declared dtype carried to the batch, so the model builds it narrow not at f64 | written; bytes gated on twill NEEDS-111 |
-| The order check that catches shuffle-after-batch | written, unrun |
-| Disk cache keyed on the transformation chain | written, blocked on file IO |
-| Augmentation for images and sequences, each seeded explicitly | written, unrun |
-| Deterministic per-sample seeding | written, unrun |
-| Streaming for data larger than memory | written, blocked on ranged file reads |
-| Dataset descriptions with origin, licence and checksums | written; **the digests are not yet pinned**, see below |
-| Downloading a dataset | **not written.** twill has no network, see docs/needs.md |
-| Tests | written, blocked on a test runner |
+| Composable pipeline: map, filter, batch, shuffle, repeat | works, `tests/pipeline_test.tw` |
+| Prefetch | **declared only.** `pipe.prefetch` records a depth and `validate` checks where it sits, but `iterate` does nothing with it: there is no second thread to overlap against. The depth is a statement of intent, which is why the cache key ignores it |
+| A declared dtype carried to the batch, so the model builds it narrow not at f64 | the declaration works and survives the cache, `tests/cache_test.tw`. The bytes are still f64. twill's NEEDS-111 is marked done in the self-hosted tree, where `src/buf.tw` packs the layout, but the Go bootstrap everyone actually runs still holds a tensor as `[]float64` with no dtype, so there is no saving to measure yet |
+| The order check that catches shuffle-after-batch | works, `tests/pipeline_test.tw` |
+| Disk cache keyed on the transformation chain | works. twill 1.7 has the file IO this was written against. `tests/cache_test.tw` covers the key, `explain` and the encoding, and `write`, `read`, `has` and `prune` against real files |
+| Augmentation for images and sequences, each seeded explicitly | works, `tests/augment_test.tw` |
+| Deterministic per-sample seeding | works, `rng.seed_for` and `rng.permutation` in `tests/augment_test.tw` |
+| Streaming for data larger than memory | works. `read_file_at` was the whole of this entry and twill 1.7 has it; `tests/stream_test.tw` reads a real file larger than one chunk |
+| Dataset descriptions with origin, licence and checksums | works, `tests/datasets_test.tw`; **the digests are not yet pinned**, see below |
+| Downloading a dataset | **not written.** twill has neither a network nor a process builtin, see docs/needs.md |
+| Number parsing | warp ships its own in `src/strutil.tw`. twill 1.7 has no `parse_i64` or `parse_f64`, so it stays |
+| Tests | 5 suites, run by `twill test tests`, which CI runs against a pinned release on every push |
 | Bundled datasets | **never.** warp describes data, it does not ship it |
 | Parallel loading across processes | **not planned for v0.1** |
-| Anything running end to end | **no** |
+| Anything running end to end | the suites do. `examples/train.tw` runs as far as the digest refusal and stops there by design |
 
 ## The worked example
 
@@ -62,6 +127,7 @@ import "twill_modules/warp/src/augment.tw" as aug
 import "twill_modules/warp/src/rng.tw" as rng
 import "twill_modules/warp/src/cache.tw" as cache
 import "twill_modules/warp/src/dtype.tw" as dt
+import "twill_modules/warp/src/sample.tw" as smp
 
 let RUN_SEED: I64 = 20260807
 
@@ -225,8 +291,10 @@ src/
   datasets.tw   descriptions, verification, and the IDX and CSV readers
   stream.tw     chunked reading for data larger than memory
   sample.tw     what moves through a pipeline
+  dtype.tw      the dtype codes a pipeline and a batch declare
   strutil.tw    parsing, because the subset has none
-tests/          one file per source file, harness.tw is the runner
+tests/          five suites, harness.tw is the runner: pipeline, cache,
+                augment (which covers rng too), datasets and stream
 docs/needs.md   what the language still owes this code
 docs/datasets.md  the digests, and what is still to verify
 ```
@@ -234,11 +302,13 @@ docs/datasets.md  the digests, and what is still to verify
 ## The sibling repositories
 
 - [twill](https://github.com/twill-lang/twill), the language.
-- [spool](https://github.com/twill-lang/spool), the package manager. warp
-  depends on it for `src/sha256.tw` rather than writing a second digest that
-  would have to agree with it byte for byte.
-- [weft](https://github.com/twill-lang/weft), plotting. warp loads it, weft
-  draws it.
+- [spool](https://github.com/twill-lang/spool), the package manager. warp used
+  to take `src/sha256.tw` from it; it now uses `std/hash` from twill itself, so
+  there is still exactly one digest in the toolchain and warp no longer needs a
+  vendored checkout to compute a cache key.
+- [weft](https://github.com/twill-lang/weft), plotting. Nothing here imports
+  it. The split is that warp loads data and weft draws it, and a pipeline that
+  also plotted would be two libraries in one.
 
 ## Licence
 

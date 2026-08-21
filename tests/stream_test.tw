@@ -4,9 +4,12 @@ import "harness.tw" as t
 import "../src/stream.tw" as stream
 import "../src/strutil.tw" as sx
 
-# The chunked reader is tested through its splitting rather than through the
-# filesystem, because the bug this code exists to avoid is a record that
-# straddles a chunk boundary, and that is a property of the splitting.
+# Most of the chunked reader is tested through its splitting rather than
+# through the filesystem, because the bug this code exists to avoid is a record
+# that straddles a chunk boundary, and that is a property of the splitting: a
+# hand-built `Stream` reaches it in three lines. One test at the bottom does go
+# to disk, because `fill` is the only caller of `read_file_at` and no amount of
+# splitting reaches it.
 
 fn a_stream_holds_a_partial_record_until_the_rest_arrives() {
   let s = stream.Stream {
@@ -104,7 +107,54 @@ fn a_reopen_refuses_when_the_file_changed_underneath() {
   }
 }
 
+# twill 1.7 has `read_file_at`, the one call the whole of this file was written
+# against and could not run until now.
+
+fn a_real_file_is_read_a_chunk_at_a_time() {
+  let dir = match temp_dir("warp-stream-test") {
+    Res.Err(_) => "/tmp/warp-stream-test",
+    Res.Ok(d) => d,
+  }
+  let path = path_join(dir, "rows.csv")
+  # Larger than one CHUNK, so a line really does straddle a read boundary here
+  # rather than only in the hand-built streams above. Built by doubling: the
+  # body always ends in a newline, so doubling it never splits a line, and the
+  # count doubles with it.
+  let body = "row,first\n"
+  let lines: I64 = 1
+  while len(body) <= stream.CHUNK {
+    body = body + body
+    lines = lines * 2
+  }
+  match write_file(path, body) {
+    Res.Err(e) => t.check("the fixture was written: " + e, false),
+    Res.Ok(_) => {
+      let s = stream.open(path)
+      let seen: I64 = 0
+      let last = ""
+      while true {
+        match stream.next_line(s) {
+          Opt.None => break,
+          Opt.Some(line) => {
+            seen = seen + 1
+            last = line
+          },
+        }
+      }
+      t.equal_i64("every line came back", seen, lines)
+      t.equal_str("the last line is intact", last, "row,first")
+      t.equal_i64("the emitted count agrees", s.emitted, lines)
+      match stream.reopen(s) {
+        Res.Err(e) => t.check("an unchanged file reopens: " + e, false),
+        Res.Ok(again) => t.equal_i64("a second pass starts at zero", again.emitted, 0),
+      }
+    },
+  }
+  let _ = remove_all(dir)
+}
+
 a_stream_holds_a_partial_record_until_the_rest_arrives()
+a_real_file_is_read_a_chunk_at_a_time()
 a_final_line_without_a_newline_is_still_a_line()
 a_carriage_return_is_stripped_from_a_line()
 an_empty_stream_ends_rather_than_returning_an_empty_line()
